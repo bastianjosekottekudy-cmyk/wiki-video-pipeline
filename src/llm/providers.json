@@ -1,0 +1,94 @@
+{
+  "defaults": {
+    "chain": [
+      "gemini/gemini-3.5-flash",
+      "groq/openai/gpt-oss-120b",
+      "gemini/gemini-flash-latest",
+      "gemini/gemini-3.5-flash-lite",
+      "groq/openai/gpt-oss-20b",
+      "gemini/gemini-flash-lite-latest",
+      "openrouter/google/gemma-4-26b-a4b-it:free"
+    ],
+    "ollama_model": "qwen3:8b",
+    "ollama_base_url": "http://localhost:11434",
+    "note": "Quality-first order (best model first). Groq shut down llama-3.1-8b-instant / llama-3.3-70b-versatile on 2026-08-16; use openai/gpt-oss-120b (strong) and openai/gpt-oss-20b (fast). OpenRouter llama-3.3:free is paid now — use google/gemma-4-26b-a4b-it:free."
+  },
+  "providers": {
+    "groq": {
+      "free_tier": true,
+      "base_url": "https://api.groq.com/openai/v1",
+      "key_env": ["GROQ_API_KEY", "LLM_API_KEY"],
+      "signup": "https://console.groq.com/keys",
+      "default_model": "openai/gpt-oss-120b",
+      "models_free_fast": [
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b"
+      ],
+      "deprecated_aliases": {
+        "llama-3.1-8b-instant": "openai/gpt-oss-20b",
+        "llama-3.3-70b-versatile": "openai/gpt-oss-120b",
+        "llama3-8b-8192": "openai/gpt-oss-20b",
+        "llama3-70b-8192": "openai/gpt-oss-120b",
+        "qwen/qwen3-32b": "openai/gpt-oss-120b"
+      }
+    },
+    "gemini": {
+      "free_tier": true,
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "key_env": ["GEMINI_API_KEY", "GOOGLE_API_KEY", "LLM_API_KEY"],
+      "signup": "https://aistudio.google.com/apikey",
+      "default_model": "gemini-3.5-flash",
+      "models_free_fast": [
+        "gemini-3.5-flash",
+        "gemini-flash-latest",
+        "gemini-3.5-flash-lite",
+        "gemini-flash-lite-latest",
+        "gemini-2.0-flash"
+      ]
+    },
+    "openrouter": {
+      "free_tier": true,
+      "base_url": "https://openrouter.ai/api/v1",
+      "key_env": ["OPENROUTER_API_KEY", "LLM_API_KEY"],
+      "signup": "https://openrouter.ai/keys",
+      "default_model": "google/gemma-4-26b-a4b-it:free",
+      "models_free_fast": [
+        "google/gemma-4-26b-a4b-it:free",
+        "google/gemma-4-31b-it:free",
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+      ],
+      "note": "Prefer model ids ending in :free; llama-3.3:free is paid as of 2026-08"
+    },
+    "openai": {
+      "free_tier": false,
+      "base_url": "https://api.openai.com/v1",
+      "key_env": ["OPENAI_API_KEY", "LLM_API_KEY"],
+      "signup": "https://platform.openai.com/api-keys",
+      "default_model": "gpt-4o-mini",
+      "models_free_fast": []
+    },
+    "ollama": {
+      "free_tier": true,
+      "base_url": "http://localhost:11434/v1",
+      "key_env": [],
+      "signup": "https://ollama.com",
+      "default_model": "qwen3:8b",
+      "models_free_fast": ["qwen3:8b", "llama3.2:3b", "gemma3:4b"]
+    }
+  },
+  "llm_env_keys": [
+    "LLM_CHAIN",
+    "LLM_PROVIDER",
+    "LLM_MODEL",
+    "LLM_FALLBACKS",
+    "LLM_API_KEY",
+    "LLM_BASE_URL",
+    "GROQ_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "OPENROUTER_API_KEY",
+    "OPENAI_API_KEY",
+    "OLLAMA_BASE_URL",
+    "OLLAMA_MODEL"
+  ]
+}

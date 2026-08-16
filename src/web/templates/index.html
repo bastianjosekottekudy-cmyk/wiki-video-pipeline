@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wiki Video Library</title>
+  <link rel="stylesheet" href="/static/style.css">
+  {% if has_running or has_uploading %}
+  <meta http-equiv="refresh" content="15">
+  {% endif %}
+</head>
+<body>
+  <header class="site-header">
+    <div>
+      <h1>Wiki Video Library</h1>
+      <p class="subtitle">Topic → Wikipedia → narration{% if youtube_enabled %} · YouTube upload on{% endif %}</p>
+    </div>
+    <div class="header-actions">
+      <label class="toggle">
+        <input type="checkbox" id="mock-toggle">
+        <span>Mock data</span>
+      </label>
+    </div>
+  </header>
+
+  <section class="cards">
+    <div class="card">
+      <div class="card-value">{{ stats.today_success }}</div>
+      <div class="card-label">Videos today</div>
+    </div>
+    <div class="card warning">
+      <div class="card-value">{{ stats.running }}</div>
+      <div class="card-label">Running</div>
+    </div>
+    <div class="card danger">
+      <div class="card-value">{{ stats.today_failed }}</div>
+      <div class="card-label">Failed today</div>
+    </div>
+    <div class="card">
+      <div class="card-value">{{ stats.uploading or 0 }}</div>
+      <div class="card-label">Uploading</div>
+    </div>
+  </section>
+
+  <section class="panel generate-panel">
+    <div class="panel-head">
+      <h2>Generate</h2>
+      <p class="hint">
+        Shorts are 9:16, up to 3 minutes. Videos are 16:9 and as long as the story needs.
+        Narration is adapted from the English Wikipedia article for your topic.
+      </p>
+    </div>
+    <div class="topic-row">
+      <input type="text" id="topic-input" class="topic-input" placeholder="e.g. Voyager 1, black holes, Ada Lovelace" autocomplete="off">
+      <button class="btn" onclick="generate('short')">Generate Short</button>
+      <button class="btn btn-secondary" onclick="generate('video')">Generate Video</button>
+    </div>
+    <p id="trigger-status" class="hint"></p>
+  </section>
+
+  {% if youtube_enabled %}
+  <section class="panel youtube-auth-panel {% if youtube_auth_warning %}youtube-auth-warning{% endif %}">
+    <div class="panel-head">
+      <h2>YouTube auth</h2>
+      <p class="hint">OAuth clients used for upload failover. Refresh tries a silent token refresh; if that fails, a Google sign-in window opens.</p>
+    </div>
+    {% if youtube_flash %}
+    <p class="youtube-flash">{{ youtube_flash }}</p>
+    {% endif %}
+    <ul class="youtube-client-list">
+      {% for client in youtube_clients %}
+      <li class="youtube-client-row">
+        <div>
+          <strong>{{ client.id }}</strong>
+          <span class="badge badge-yt-{{ client.status }}">{{ client.status }}</span>
+          {% if client.detail %}
+          <p class="meta">{{ client.detail }}</p>
+          {% endif %}
+        </div>
+        {% if client.can_refresh %}
+        <button type="button" class="btn btn-small" onclick="refreshYoutubeClient({{ client.id|tojson }})">Refresh</button>
+        {% endif %}
+      </li>
+      {% else %}
+      <li class="hint">No YouTube clients configured.</li>
+      {% endfor %}
+    </ul>
+    <p id="youtube-auth-status" class="hint"></p>
+  </section>
+  {% endif %}
+
+  <section class="panel filters-panel">
+    <form method="get" class="filters" id="filter-form">
+      <div class="filter-group">
+        <span class="filter-label">Format</span>
+        <div class="chips">
+          <a class="chip {% if not filter_format %}active{% endif %}"
+             href="/?{% if filter_date %}date={{ filter_date }}{% endif %}">All</a>
+          <a class="chip {% if filter_format == 'short' %}active{% endif %}"
+             href="/?fmt=short{% if filter_date %}&date={{ filter_date }}{% endif %}">Short</a>
+          <a class="chip {% if filter_format == 'video' %}active{% endif %}"
+             href="/?fmt=video{% if filter_date %}&date={{ filter_date }}{% endif %}">Video</a>
+        </div>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label" for="date">Date</label>
+        <select name="date" id="date" onchange="this.form.submit()">
+          <option value="">All dates</option>
+          {% for d in available_dates %}
+          <option value="{{ d }}" {% if filter_date == d %}selected{% endif %}>{{ d }}</option>
+          {% endfor %}
+        </select>
+        {% if filter_format %}
+        <input type="hidden" name="fmt" value="{{ filter_format }}">
+        {% endif %}
+      </div>
+    </form>
+    <div class="bulk-actions">
+      <span class="filter-label">Library cleanup</span>
+      <div class="trigger-row">
+        <button type="button" class="btn btn-danger" onclick="deleteBulk('uploaded')">Delete uploaded videos</button>
+        <button type="button" class="btn btn-danger" onclick="deleteBulk('all')">Delete all videos</button>
+      </div>
+      <p class="hint">Removes local files and dashboard rows. Does not delete videos from YouTube.</p>
+      <p id="bulk-status" class="hint"></p>
+    </div>
+  </section>
+
+  <section class="library">
+    {% for group in groups %}
+    <div class="date-group">
+      <h2 class="date-heading">{{ group.date }}</h2>
+      <div class="video-grid">
+        {% for run in group.runs %}
+        <article class="video-card">
+          <div class="video-card-top">
+            <div>
+              <h3>{{ run.video_title }}</h3>
+              <p class="meta">{{ run.format_label }} · {{ run.topic }} · #{{ run.id }}</p>
+            </div>
+            <span class="badge badge-{{ run.display_status }}">{{ run.display_status }}</span>
+          </div>
+          <div class="video-meta">
+            <span>{{ run.format_label }}</span>
+            <span>{{ run.duration }}</span>
+          </div>
+          {% if run.has_video %}
+          <video class="thumb-player {% if run.format == 'short' %}portrait{% endif %}" controls preload="metadata" src="/videos/{{ run.id }}/file"></video>
+          {% elif run.status == 'running' %}
+          <div class="placeholder">Generating…</div>
+          {% elif run.display_status == 'missing' %}
+          <div class="placeholder failed">File missing on disk — safe to Delete</div>
+          {% elif run.status == 'failed' %}
+          <div class="placeholder failed">Failed — see details</div>
+          {% else %}
+          <div class="placeholder">No video file</div>
+          {% endif %}
+          {% if run.is_uploaded and run.youtube_url %}
+          <p class="meta yt-link"><a href="{{ run.youtube_url }}" target="_blank" rel="noopener">Watch on YouTube</a></p>
+          {% elif run.upload_status == 'failed' and run.upload_error %}
+          <p class="meta upload-error">Upload failed — retry below</p>
+          {% elif run.upload_status == 'uploading' %}
+          <p class="meta">Uploading to YouTube…</p>
+          {% endif %}
+          <div class="card-actions">
+            {% if run.has_video %}
+            <a class="btn btn-small" href="/videos/{{ run.id }}/file">Play</a>
+            <a class="btn btn-small btn-secondary" href="/videos/{{ run.id }}/download">Download</a>
+            {% if run.can_upload and run.upload_status != 'uploading' %}
+            <button type="button" class="btn btn-small btn-upload" onclick="uploadRun({{ run.id }})">{{ run.upload_label }}</button>
+            {% endif %}
+            {% endif %}
+            <a class="btn btn-small btn-ghost" href="/runs/{{ run.id }}">Details</a>
+            {% if run.status != 'running' and run.upload_status != 'uploading' %}
+            <button type="button" class="btn btn-small btn-danger" onclick='deleteRun({{ run.id }}, {{ run.video_title|tojson }})'>Delete</button>
+            {% endif %}
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+    </div>
+    {% else %}
+    <div class="empty-state panel">
+      <h2>No videos yet</h2>
+      <p>Type a topic above and generate a Short or a Video.</p>
+    </div>
+    {% endfor %}
+  </section>
+
+  <script>
+    async function generate(fmt) {
+      const status = document.getElementById('trigger-status');
+      const topic = (document.getElementById('topic-input').value || '').trim();
+      const mock = document.getElementById('mock-toggle').checked;
+      if (!topic) {
+        status.textContent = 'Enter a topic first.';
+        return;
+      }
+      status.textContent = `Starting ${fmt} for “${topic}”…`;
+      try {
+        const params = new URLSearchParams({ topic, fmt, mock: String(mock) });
+        const res = await fetch('/api/generate?' + params.toString(), { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          status.textContent = `${fmt}: started. Refreshing…`;
+          setTimeout(() => location.reload(), 1500);
+        } else {
+          status.textContent = data.detail || 'Failed to start';
+        }
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    document.getElementById('topic-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') generate('short');
+    });
+
+    async function deleteRun(id, title) {
+      const label = title || ('run #' + id);
+      if (!confirm('Permanently delete "' + label + '" from disk and the dashboard? This cannot be undone.')) {
+        return;
+      }
+      try {
+        const res = await fetch('/api/runs/' + id, { method: 'DELETE' });
+        const data = await res.json();
+        if (res.ok) {
+          location.reload();
+        } else {
+          alert(data.detail || 'Delete failed');
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    async function deleteBulk(scope) {
+      const status = document.getElementById('bulk-status');
+      const messages = {
+        all: 'Delete ALL local videos and dashboard rows? This cannot be undone. YouTube copies stay online.',
+        uploaded: 'Delete all locally stored videos that were already uploaded to YouTube? This cannot be undone.',
+      };
+      if (!confirm(messages[scope] || messages.all)) return;
+      status.textContent = 'Deleting…';
+      try {
+        const res = await fetch('/api/runs/delete-bulk?scope=' + encodeURIComponent(scope), { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          const skipped = (data.skipped && data.skipped.length) || 0;
+          status.textContent = `Deleted ${data.deleted_count || 0}` +
+            (skipped ? ` (skipped ${skipped} busy)` : '') + '. Refreshing…';
+          setTimeout(() => location.reload(), 800);
+        } else {
+          status.textContent = data.detail || 'Bulk delete failed';
+        }
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    async function uploadRun(id) {
+      try {
+        const res = await fetch('/api/runs/' + id + '/upload', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) location.reload();
+        else alert(data.detail || 'Upload failed to start');
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    async function refreshYoutubeClient(clientId) {
+      const status = document.getElementById('youtube-auth-status');
+      status.textContent = 'Refreshing ' + clientId + '…';
+      try {
+        const res = await fetch('/api/youtube/clients/' + encodeURIComponent(clientId) + '/refresh', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) {
+          status.textContent = data.detail || 'Refresh failed';
+          return;
+        }
+        if (data.ok) {
+          status.textContent = clientId + ': ' + (data.detail || 'ok') + ' — reloading…';
+          setTimeout(() => location.reload(), 600);
+          return;
+        }
+        if (data.needs_browser) {
+          status.textContent = clientId + ': complete Google sign-in in the browser window that opens…';
+          const authRes = await fetch('/api/youtube/clients/' + encodeURIComponent(clientId) + '/authorize', { method: 'POST' });
+          const authData = await authRes.json().catch(() => ({}));
+          if (!authRes.ok || !authData.ok) {
+            status.textContent = authData.detail || 'Authorization failed';
+            return;
+          }
+          status.textContent = clientId + ': authorized — reloading…';
+          setTimeout(() => location.reload(), 600);
+          return;
+        }
+        status.textContent = data.detail || 'Refresh failed';
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+      }
+    }
+  </script>
+</body>
+</html>

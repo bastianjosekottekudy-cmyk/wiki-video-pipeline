@@ -1,0 +1,56 @@
+web:
+  host: 127.0.0.1
+  port: 8082
+
+# Short = 9:16 YouTube Shorts (hard cap 180s). Video = 16:9, no story cap.
+formats:
+  short:
+    width: 1080
+    height: 1920
+    max_video_duration_sec: 180
+    target_duration_sec: 120
+    source_chars: 8000
+  video:
+    width: 1920
+    height: 1080
+    max_video_duration_sec: 0   # 0 = no trim
+    target_duration_sec: 0      # duration follows the story
+    source_chars: 18000
+
+video:
+  fps: 24
+  format: mp4
+  codec: auto          # auto | h264_nvenc | libx264
+  concat_after_clips: 12
+
+tts:
+  provider: edge-tts
+  rate: "-8%"
+  segment_pause_sec: 0.4
+  voice: en-US-JennyNeural
+
+script:
+  provider: chain
+  style: documentary host; hook first; surprising true facts; complete spoken sentences; never invent; never read citations or URLs
+
+images:
+  max_per_article: 8
+  skip_fair_use: true
+
+youtube:
+  clients:
+    - id: primary
+      client_secrets: secrets/client_secrets.json
+      token: secrets/token.json
+    - id: backup1
+      client_secrets: secrets/clients/backup1/client_secrets.json
+      token: secrets/clients/backup1/token.json
+    - id: backup2
+      client_secrets: secrets/clients/backup2/client_secrets.json
+      token: secrets/clients/backup2/token.json
+  enabled: true
+  category_id: "27"
+  privacy: public
+  made_for_kids: false
+  license: creativeCommon
+  tags: [wikipedia, education, explainer, documentary]

@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Run #{{ run.id }} — {{ run.wiki_title or run.topic }}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  {% if run.status == 'running' or run.upload_status == 'uploading' %}
+  <meta http-equiv="refresh" content="10">
+  {% endif %}
+</head>
+<body>
+  <header class="site-header">
+    <div>
+      <a href="/" class="back-link">← Back to library</a>
+      <h1>{{ run.video_title }}</h1>
+      <p class="subtitle">
+        {{ run.format_label }} · {{ run.topic }} · Run #{{ run.id }}
+        · <span class="badge badge-{{ run.display_status }}">{{ run.display_status }}</span>
+        · {{ run.duration }}
+      </p>
+    </div>
+    <div class="header-actions">
+      {% if run.has_video %}
+      <a class="btn" href="/videos/{{ run.id }}/download">Download MP4</a>
+      {% if run.can_upload and run.upload_status != 'uploading' %}
+      <button type="button" class="btn btn-upload" onclick="uploadRun({{ run.id }})">{{ run.upload_label }} to YouTube</button>
+      {% endif %}
+      {% endif %}
+      {% if run.status != 'running' and run.upload_status != 'uploading' %}
+      <button type="button" class="btn btn-danger" onclick='deleteRun({{ run.id }}, {{ run.video_title|tojson }})'>Delete permanently</button>
+      {% endif %}
+    </div>
+  </header>
+
+  {% if run.error_message %}
+  <section class="panel error-panel">
+    <h2>Error</h2>
+    <pre>{{ run.error_message }}</pre>
+  </section>
+  {% endif %}
+
+  <section class="panel player-panel">
+    <h2>Local {{ run.format_label }}</h2>
+    {% if run.has_video %}
+    <video class="detail-player {% if run.format == 'short' %}portrait{% endif %}" controls preload="metadata" src="/videos/{{ run.id }}/file"></video>
+    <p class="hint">YouTube title: <code>{{ run.video_title }}</code></p>
+    <p class="hint">Stored at <code>{{ run.video_path }}</code></p>
+    {% elif run.status == 'running' %}
+    <div class="placeholder">Video is still generating…</div>
+    {% else %}
+    <div class="placeholder">No local video file for this run.</div>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>YouTube</h2>
+    {% if run.upload_status == 'uploading' %}
+    <p>Upload in progress… this page refreshes automatically.</p>
+    {% elif run.is_uploaded and run.youtube_url %}
+    <p>
+      Status: <span class="badge badge-uploaded">uploaded</span>
+      · <a href="{{ run.youtube_url }}" target="_blank" rel="noopener">{{ run.youtube_url }}</a>
+    </p>
+    {% elif run.upload_status == 'failed' %}
+    <p>Status: <span class="badge badge-upload-failed">upload failed</span></p>
+    {% if run.upload_error %}
+    <pre class="script-preview">{{ run.upload_error }}</pre>
+    {% endif %}
+    {% else %}
+    <p>Status: <span class="badge badge-pending">not uploaded</span></p>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>Step log</h2>
+    <ol class="step-log">
+      {% for step in run.steps %}
+      <li>
+        <strong>{{ step.step }}</strong>
+        {% if step.detail %} — {{ step.detail }}{% endif %}
+        <span class="hint">{{ step.at }}</span>
+      </li>
+      {% else %}
+      <li>No steps recorded yet.</li>
+      {% endfor %}
+    </ol>
+  </section>
+
+  <section class="panel">
+    <h2>Wikipedia</h2>
+    {% if run.article and run.article.title %}
+    <p><strong>{{ run.article.title }}</strong></p>
+    {% if run.article.description %}<p class="meta">{{ run.article.description }}</p>{% endif %}
+    {% if run.wiki_url or run.article.url %}
+    <p class="meta"><a href="{{ run.wiki_url or run.article.url }}" target="_blank" rel="noopener">Open on Wikipedia</a></p>
+    {% endif %}
+    {% elif run.wiki_title %}
+    <p><strong>{{ run.wiki_title }}</strong></p>
+    {% else %}
+    <p class="hint">No article data yet.</p>
+    {% endif %}
+  </section>
+
+  {% if run.credits %}
+  <section class="panel">
+    <h2>Image credits</h2>
+    <ul class="trends-list">
+      {% for credit in run.credits %}
+      <li>
+        {{ credit.title or 'image' }} — {{ credit.artist or 'Unknown' }} — {{ credit.license or '' }}
+        {% if credit.source_url %}<br><a href="{{ credit.source_url }}" target="_blank" rel="noopener">Source</a>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  {% if run.script_content %}
+  <section class="panel">
+    <h2>Narration script</h2>
+    <pre class="script-preview">{{ run.script_content }}</pre>
+  </section>
+  {% endif %}
+
+  <script>
+    async function deleteRun(id, title) {
+      const label = title || ('run #' + id);
+      if (!confirm('Permanently delete "' + label + '" from disk and the dashboard? This cannot be undone.')) {
+        return;
+      }
+      try {
+        const res = await fetch('/api/runs/' + id, { method: 'DELETE' });
+        const data = await res.json();
+        if (res.ok) window.location.href = '/';
+        else alert(data.detail || 'Delete failed');
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    async function uploadRun(id) {
+      try {
+        const res = await fetch('/api/runs/' + id + '/upload', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) location.reload();
+        else alert(data.detail || 'Upload failed to start');
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+  </script>
+</body>
+</html>

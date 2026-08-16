@@ -1,0 +1,14 @@
+urllib3>=1.26,<2
+edge-tts>=6.1.12
+moviepy>=2.0.0
+Pillow>=10.4.0
+PyYAML>=6.0.2
+python-dotenv>=1.0.1
+fastapi>=0.115.0
+uvicorn>=0.32.0
+jinja2>=3.1.4
+google-api-python-client>=2.149.0
+google-auth-oauthlib>=1.2.1
+google-auth-httplib2>=0.2.0
+httpx>=0.27.2
+tzdata>=2024.1
