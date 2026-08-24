@@ -67,6 +67,7 @@
     {% if run.upload_error %}
     <pre class="script-preview">{{ run.upload_error }}</pre>
     {% endif %}
+    <p class="hint">OAuth clients are listed under <code>youtube.clients</code> in pipeline.yaml (primary then backups). Fix auth if needed (<code>python -m src.youtube.auth --client backup1</code>), then Upload again.</p>
     {% else %}
     <p>Status: <span class="badge badge-pending">not uploaded</span></p>
     {% endif %}

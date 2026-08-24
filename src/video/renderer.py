@@ -322,45 +322,54 @@ def render_video(
     slides_dir = output_dir / "slides"
     slides_dir.mkdir(exist_ok=True)
     groups: list[list[Path]] = []
+    img_i = 0
 
-    intro = _make_solid_slide(width, height, subtitle, "From Wikipedia", label)
-    intro_path = slides_dir / "00_intro.png"
-    intro.save(intro_path, optimize=True)
+    def _reuse_image() -> str | None:
+        nonlocal img_i
+        if not image_paths:
+            return None
+        path = image_paths[img_i % len(image_paths)]
+        img_i += 1
+        return path
+
+    def _compose_slide(dest: Path, heading: str, sub: str, still: str | None) -> Path:
+        if still:
+            slide = _make_image_slide(width, height, still, heading, sub, label)
+        else:
+            slide = _make_solid_slide(width, height, heading, sub, label)
+        slide.save(dest, optimize=True)
+        return dest
+
+    intro_path = _compose_slide(
+        slides_dir / "00_intro.png",
+        subtitle,
+        "From Wikipedia",
+        _reuse_image(),
+    )
     groups.append([intro_path])
 
-    img_i = 0
     if not chapters:
         chapters = [{"heading": wiki_title, "narration": ""}]
     for idx, chapter in enumerate(chapters, start=1):
         heading = str(chapter.get("heading") or wiki_title)
+        n_stills = 2 if fmt == "video" and len(image_paths) >= 2 else 1
         group: list[Path] = []
-        stills = []
-        if img_i < len(image_paths):
-            stills.append(image_paths[img_i])
-            img_i += 1
-        if img_i < len(image_paths) and fmt == "video":
-            stills.append(image_paths[img_i])
-            img_i += 1
-        if stills:
-            for j, still in enumerate(stills, start=1):
-                slide = _make_image_slide(
-                    width, height, still, heading, wiki_title, label
-                )
-                path = slides_dir / f"{idx:02d}_ch_{j}.png"
-                slide.save(path, optimize=True)
-                group.append(path)
-        else:
-            slide = _make_solid_slide(width, height, heading, wiki_title, label)
-            path = slides_dir / f"{idx:02d}_ch.png"
-            slide.save(path, optimize=True)
+        for j in range(n_stills):
+            path = _compose_slide(
+                slides_dir / f"{idx:02d}_ch_{j + 1}.png",
+                heading,
+                wiki_title,
+                _reuse_image(),
+            )
             group.append(path)
         groups.append(group)
 
-    outro = _make_solid_slide(
-        width, height, "Thanks for watching", "Adapted from Wikipedia · CC BY-SA", label
+    outro_path = _compose_slide(
+        slides_dir / "99_outro.png",
+        "Thanks for watching",
+        "Adapted from Wikipedia · CC BY-SA",
+        _reuse_image(),
     )
-    outro_path = slides_dir / "99_outro.png"
-    outro.save(outro_path, optimize=True)
     groups.append([outro_path])
 
     audio = AudioFileClip(audio_path)

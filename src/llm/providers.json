@@ -11,7 +11,7 @@
     ],
     "ollama_model": "qwen3:8b",
     "ollama_base_url": "http://localhost:11434",
-    "note": "Quality-first order (best model first). Groq shut down llama-3.1-8b-instant / llama-3.3-70b-versatile on 2026-08-16; use openai/gpt-oss-120b (strong) and openai/gpt-oss-20b (fast). OpenRouter llama-3.3:free is paid now — use google/gemma-4-26b-a4b-it:free."
+    "note": "Quality-first order (best model first). Groq shut down llama-3.1-8b-instant / llama-3.3-70b-versatile on 2026-08-16; use openai/gpt-oss-120b (strong) and openai/gpt-oss-20b (fast). OpenRouter llama-3.3:free is paid now — use google/gemma-4-26b-a4b-it:free. gemini-flash-latest is a moving alias (Gemini 3.x Flash with thinking on); the chain sends reasoning_effort=low (minimal is rejected)."
   },
   "providers": {
     "groq": {

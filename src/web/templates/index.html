@@ -62,7 +62,7 @@
   <section class="panel youtube-auth-panel {% if youtube_auth_warning %}youtube-auth-warning{% endif %}">
     <div class="panel-head">
       <h2>YouTube auth</h2>
-      <p class="hint">OAuth clients used for upload failover. Refresh tries a silent token refresh; if that fails, a Google sign-in window opens.</p>
+      <p class="hint">OAuth clients used for upload failover. Refresh tries a silent token refresh; if that fails, a Google sign-in window opens (Desktop localhost flow).</p>
     </div>
     {% if youtube_flash %}
     <p class="youtube-flash">{{ youtube_flash }}</p>
@@ -78,7 +78,7 @@
           {% endif %}
         </div>
         {% if client.can_refresh %}
-        <button type="button" class="btn btn-small" onclick="refreshYoutubeClient({{ client.id|tojson }})">Refresh</button>
+        <button type="button" class="btn btn-small" onclick='refreshYoutubeClient({{ client.id|tojson }})'>Refresh</button>
         {% endif %}
       </li>
       {% else %}
@@ -158,7 +158,7 @@
           {% if run.is_uploaded and run.youtube_url %}
           <p class="meta yt-link"><a href="{{ run.youtube_url }}" target="_blank" rel="noopener">Watch on YouTube</a></p>
           {% elif run.upload_status == 'failed' and run.upload_error %}
-          <p class="meta upload-error">Upload failed — retry below</p>
+          <p class="meta upload-error">Upload failed — retry below or wait for the hourly retry</p>
           {% elif run.upload_status == 'uploading' %}
           <p class="meta">Uploading to YouTube…</p>
           {% endif %}
@@ -273,7 +273,9 @@
       const status = document.getElementById('youtube-auth-status');
       status.textContent = 'Refreshing ' + clientId + '…';
       try {
-        const res = await fetch('/api/youtube/clients/' + encodeURIComponent(clientId) + '/refresh', { method: 'POST' });
+        const res = await fetch('/api/youtube/clients/' + encodeURIComponent(clientId) + '/refresh', {
+          method: 'POST',
+        });
         const data = await res.json();
         if (!res.ok) {
           status.textContent = data.detail || 'Refresh failed';
@@ -286,7 +288,10 @@
         }
         if (data.needs_browser) {
           status.textContent = clientId + ': complete Google sign-in in the browser window that opens…';
-          const authRes = await fetch('/api/youtube/clients/' + encodeURIComponent(clientId) + '/authorize', { method: 'POST' });
+          const authRes = await fetch(
+            '/api/youtube/clients/' + encodeURIComponent(clientId) + '/authorize',
+            { method: 'POST' }
+          );
           const authData = await authRes.json().catch(() => ({}));
           if (!authRes.ok || !authData.ok) {
             status.textContent = authData.detail || 'Authorization failed';

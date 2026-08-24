@@ -236,6 +236,56 @@ def _upload_run_video(run_id: int) -> None:
     attempt_youtube_upload(run_id, str(path))
 
 
+def _retry_failed_uploads() -> None:
+    """Re-attempt YouTube uploads that previously failed (only when any exist)."""
+    from src.scheduler import sync_failed_upload_retry_job
+
+    if not _youtube_enabled():
+        sync_failed_upload_retry_job()
+        return
+
+    failed = store.list_failed_uploads()
+    if not failed:
+        sync_failed_upload_retry_job()
+        return
+
+    logger.info("Retrying %s failed YouTube upload(s)", len(failed))
+    for run in failed:
+        run_id = int(run["id"])
+        if run.get("status") == "running":
+            continue
+        if not _video_exists(run):
+            logger.warning(
+                "Skipping upload retry for run %s — video file missing",
+                run_id,
+            )
+            continue
+
+        with _upload_lock:
+            if run_id in _uploading_runs:
+                continue
+            _uploading_runs.add(run_id)
+
+        store.set_upload_status(run_id, "uploading", upload_error=None)
+        store.append_step_log(run_id, "upload", "Hourly retry of failed upload")
+        try:
+            _upload_run_video(run_id)
+        except Exception:
+            logger.exception("Hourly upload retry failed for run %s", run_id)
+            current = store.get_run(run_id)
+            if current and (current.get("upload_status") or "") == "uploading":
+                store.set_upload_status(
+                    run_id,
+                    "failed",
+                    upload_error="Hourly retry crashed unexpectedly",
+                )
+        finally:
+            with _upload_lock:
+                _uploading_runs.discard(run_id)
+
+    sync_failed_upload_retry_job()
+
+
 def _group_by_date(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for run in runs:

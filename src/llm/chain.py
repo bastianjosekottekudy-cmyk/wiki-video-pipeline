@@ -122,6 +122,23 @@ _GROQ_MODEL_ALIASES = {
 }
 
 
+def _is_gemini_thinking_model(model: str) -> bool:
+    """Gemini 2.5+/3.x Flash and Pro think by default; Lite does not.
+
+    ``gemini-flash-latest`` is a moving alias (now 3.x Flash with thinking on).
+    """
+    model_l = (model or "").lower()
+    if not model_l or "lite" in model_l:
+        return False
+    if "flash-latest" in model_l:
+        return True
+    if "gemini-pro" in model_l or "-pro-" in model_l or model_l.endswith("-pro"):
+        return True
+    if "flash" not in model_l:
+        return False
+    return any(tag in model_l for tag in ("2.5", "3.5", "3.6", "gemini-3", "3-flash"))
+
+
 def _canonicalize_model(provider: str, model: str) -> str:
     model = (model or "").strip()
     if provider != "groq" or not model:
@@ -299,14 +316,14 @@ class LLMChain:
         if endpoint.provider == "openrouter":
             headers["HTTP-Referer"] = self.app_referer
             headers["X-Title"] = self.app_title
-        # gpt-oss / some Gemini models burn completion budget on hidden reasoning.
+        # gpt-oss / Gemini 2.5+/3.x Flash+Pro (incl. flash-latest) burn budget on thinking.
         model_l = (endpoint.model or "").lower()
         is_gpt_oss = "gpt-oss" in model_l
-        is_gemini_thinking = endpoint.provider == "gemini" and (
-            ("3.5-flash" in model_l and "lite" not in model_l)
-            or "gemini-pro" in model_l
+        is_gemini_thinking = endpoint.provider == "gemini" and _is_gemini_thinking_model(
+            endpoint.model
         )
-        min_budget = 1536 if (is_gpt_oss or is_gemini_thinking) else max_tokens
+        needs_thinking_budget = is_gpt_oss or is_gemini_thinking
+        min_budget = 1536 if needs_thinking_budget else max_tokens
         token_budget = max(max_tokens, min_budget)
         payload: dict[str, Any] = {
             "model": endpoint.model,
@@ -321,7 +338,12 @@ class LLMChain:
             payload["reasoning_effort"] = "low"
         else:
             payload["max_tokens"] = token_budget
-        with httpx.Client(timeout=60.0) as client:
+        if is_gemini_thinking:
+            # OpenAI-compat maps this to Gemini thinking_level (default is high/dynamic).
+            # flash-latest (3.x Flash) rejects MINIMAL; LOW is the fast supported level.
+            payload["reasoning_effort"] = "low"
+        timeout = 120.0 if needs_thinking_budget else 60.0
+        with httpx.Client(timeout=timeout) as client:
             resp = client.post(url, headers=headers, json=payload)
             if resp.status_code >= 400:
                 raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
