@@ -368,6 +368,55 @@ class LLMChain:
             )
         return text
 
+    def cloud_endpoints(self) -> list[LLMEndpoint]:
+        """Cloud/local chat endpoints only (excludes the terminal template step)."""
+        return [e for e in self.chain if e.provider != "template"]
+
+    def try_complete(
+        self,
+        endpoint: LLMEndpoint,
+        system: str,
+        user: str,
+        *,
+        temperature: float = 0.55,
+        max_tokens: int = 1800,
+    ) -> str | None:
+        """Invoke one endpoint with a single 429 retry. Returns None on failure."""
+        for attempt in range(2):
+            try:
+                text = self._invoke_endpoint(
+                    endpoint,
+                    system,
+                    user,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                if not text.strip():
+                    raise RuntimeError("empty model response")
+                self.last_endpoint = endpoint.label
+                return text
+            except Exception as exc:  # noqa: BLE001
+                err = str(exc)
+                self.last_error = f"{endpoint.label}: {err[:300]}"
+                if ("429" in err or "RESOURCE_EXHAUSTED" in err) and attempt == 0:
+                    m = re.search(r"[Rr]etry in ([\d.]+)", err)
+                    wait = float(m.group(1)) if m else 2.0
+                    wait = min(max(wait, 0.5), 8.0)
+                    logger.warning(
+                        "LLM rate-limited on %s — retry in %.1fs",
+                        endpoint.label,
+                        wait,
+                    )
+                    time.sleep(wait)
+                    continue
+                logger.warning(
+                    "LLM failed on %s (%s)",
+                    endpoint.label,
+                    err[:160],
+                )
+                return None
+        return None
+
     def complete(
         self,
         system: str,
@@ -376,63 +425,40 @@ class LLMChain:
         temperature: float = 0.55,
         max_tokens: int = 1800,
     ) -> str:
+        """
+        Return model text, or ``TEMPLATE_SENTINEL`` when all cloud endpoints fail /
+        the chain reaches the template step.
+        """
         self.last_endpoint = None
         self.last_error = None
         self.last_used_template = False
         errors: list[str] = []
 
-        for endpoint in self.chain:
-            if endpoint.provider == "template":
-                self.last_used_template = True
-                self.last_endpoint = "template"
+        for endpoint in self.cloud_endpoints():
+            text = self.try_complete(
+                endpoint,
+                system,
+                user,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            if text:
                 if errors:
-                    self.last_error = " | ".join(errors)[:500]
-                    logger.warning(
-                        "All LLM endpoints failed — using template. Last: %s",
-                        errors[-1][:200],
-                    )
-                return TEMPLATE_SENTINEL
-
-            for attempt in range(2):
-                try:
-                    text = self._invoke_endpoint(
-                        endpoint,
-                        system,
-                        user,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                    )
-                    if not text.strip():
-                        raise RuntimeError("empty model response")
-                    self.last_endpoint = endpoint.label
-                    if attempt or errors:
-                        logger.info("LLM ok via %s", endpoint.label)
-                    return text
-                except Exception as exc:  # noqa: BLE001
-                    err = str(exc)
-                    errors.append(f"{endpoint.label}: {err[:180]}")
-                    self.last_error = err[:300]
-                    if ("429" in err or "RESOURCE_EXHAUSTED" in err) and attempt == 0:
-                        m = re.search(r"[Rr]etry in ([\d.]+)", err)
-                        wait = float(m.group(1)) if m else 2.0
-                        wait = min(max(wait, 0.5), 8.0)
-                        logger.warning(
-                            "LLM rate-limited on %s — retry in %.1fs then fallback",
-                            endpoint.label,
-                            wait,
-                        )
-                        time.sleep(wait)
-                        continue
-                    logger.warning(
-                        "LLM failed on %s — next fallback (%s)",
-                        endpoint.label,
-                        err[:160],
-                    )
-                    break
+                    logger.info("LLM ok via %s", endpoint.label)
+                return text
+            if self.last_error:
+                errors.append(self.last_error[:180])
 
         self.last_used_template = True
         self.last_endpoint = "template"
-        self.last_error = " | ".join(errors)[:500] if errors else None
+        if errors:
+            self.last_error = " | ".join(errors)[:500]
+            logger.warning(
+                "All LLM endpoints failed — using template. Last: %s",
+                errors[-1][:200],
+            )
+        else:
+            self.last_error = None
         return TEMPLATE_SENTINEL
 
     def complete_json(
