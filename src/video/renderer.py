@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+
+# Ensure moviepy / imageio-ffmpeg uses system ffmpeg (supporting NVENC / hardware acceleration)
+_system_ffmpeg = shutil.which("ffmpeg")
+if _system_ffmpeg and "IMAGEIO_FFMPEG_EXE" not in os.environ:
+    os.environ["IMAGEIO_FFMPEG_EXE"] = _system_ffmpeg
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
@@ -190,7 +196,12 @@ def _make_image_slide(
 
 
 def _nvenc_available() -> bool:
-    ffmpeg = shutil.which("ffmpeg")
+    try:
+        import imageio_ffmpeg
+
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return False
     try:
@@ -210,7 +221,36 @@ def _nvenc_available() -> bool:
             timeout=10,
             check=False,
         )
-        return gpu.returncode == 0 and bool(gpu.stdout.strip())
+        if gpu.returncode != 0 or not bool(gpu.stdout.strip()):
+            return False
+        # Quick test to ensure nvenc encoder is fully functional with current ffmpeg
+        test = subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=256x256:d=0.04",
+                "-c:v",
+                "h264_nvenc",
+                "-preset",
+                "p4",
+                "-rc",
+                "vbr",
+                "-cq",
+                "23",
+                "-b:v",
+                "0",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        return test.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
@@ -224,6 +264,21 @@ def _resolve_encoder(video_cfg: dict[str, Any]) -> tuple[str, list[str]]:
         logger.warning("h264_nvenc requested but unavailable; falling back to libx264")
     logger.info("Using CPU libx264 for video encode")
     return "libx264", ["-preset", "veryfast", "-crf", "23"]
+
+
+def _safe_write_videofile(video: Any, target_path: Path, write_kwargs: dict[str, Any]) -> None:
+    try:
+        video.write_videofile(str(target_path), **write_kwargs)
+    except Exception as exc:
+        if write_kwargs.get("codec") == "h264_nvenc":
+            logger.warning("NVENC encode failed (%s); falling back to CPU libx264...", exc)
+            fallback_kwargs = dict(write_kwargs)
+            fallback_kwargs["codec"] = "libx264"
+            fallback_kwargs["threads"] = 4
+            fallback_kwargs["ffmpeg_params"] = ["-preset", "veryfast", "-crf", "23"]
+            video.write_videofile(str(target_path), **fallback_kwargs)
+        else:
+            raise
 
 
 def _load_segment_durations(output_dir: Path) -> list[dict[str, Any]] | None:
@@ -435,7 +490,7 @@ def render_video(
             if video.duration and video.duration > float(audio_slice.duration or 0):
                 video = video.subclipped(0, float(audio_slice.duration))
             part_path = parts_dir / f"part_{index:02d}.mp4"
-            video.write_videofile(str(part_path), **write_kwargs)
+            _safe_write_videofile(video, part_path, write_kwargs)
             video.close()
             part_files.append(part_path)
             return end_t
@@ -460,7 +515,7 @@ def render_video(
     video = video.with_audio(audio)
     if video.duration and video.duration > audio_duration:
         video = video.subclipped(0, audio_duration)
-    video.write_videofile(str(output_path), **write_kwargs)
+    _safe_write_videofile(video, output_path, write_kwargs)
     logger.info("Wrote %s (%s, %.1fs): %s", fmt, codec, audio_duration, output_path)
     video.close()
     audio.close()

@@ -3,6 +3,13 @@
 from __future__ import annotations
 
 import logging
+import os
+import shutil
+
+# Ensure moviepy / imageio-ffmpeg uses system ffmpeg (supporting NVENC / hardware acceleration)
+_system_ffmpeg = shutil.which("ffmpeg")
+if _system_ffmpeg and "IMAGEIO_FFMPEG_EXE" not in os.environ:
+    os.environ["IMAGEIO_FFMPEG_EXE"] = _system_ffmpeg
 
 import uvicorn
 

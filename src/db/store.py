@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,12 +14,19 @@ from typing import Any, Iterator
 
 from src.config import PROJECT_ROOT, get_env
 
+logger = logging.getLogger(__name__)
+
 DB_PATH = Path(get_env("DB_PATH", str(PROJECT_ROOT / "runs.db")))
 
+_db_lock = threading.RLock()
 
-def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+
+def _connect(timeout: float = 60.0) -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=timeout)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=60000;")
     return conn
 
 
@@ -28,6 +38,9 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str)
 
 def init_db() -> None:
     with _connect() as conn:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA busy_timeout=60000;")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS runs (
@@ -65,13 +78,25 @@ def init_db() -> None:
 
 
 @contextmanager
-def db() -> Iterator[sqlite3.Connection]:
-    conn = _connect()
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
+def db(timeout: float = 60.0, retries: int = 5) -> Iterator[sqlite3.Connection]:
+    with _db_lock:
+        attempt = 0
+        while True:
+            conn = _connect(timeout=timeout)
+            try:
+                yield conn
+                conn.commit()
+                break
+            except sqlite3.OperationalError as exc:
+                conn.rollback()
+                attempt += 1
+                if "locked" in str(exc).lower() and attempt < retries:
+                    logger.warning("Database locked; retrying transaction (attempt %d/%d)...", attempt, retries)
+                    time.sleep(0.15 * attempt)
+                    continue
+                raise
+            finally:
+                conn.close()
 
 
 def create_run(topic: str, fmt: str, run_date: str) -> int:
@@ -101,6 +126,8 @@ def update_run(run_id: int, **fields: Any) -> None:
 def append_step_log(run_id: int, step: str, detail: str = "") -> None:
     with db() as conn:
         row = conn.execute("SELECT steps_log FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if not row:
+            return
         log: list[dict[str, str]] = json.loads(row["steps_log"] or "[]")
         log.append(
             {

@@ -5,8 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import shutil
 from pathlib import Path
 from typing import Any
+
+# Ensure moviepy / imageio-ffmpeg uses system ffmpeg (supporting NVENC / hardware acceleration)
+_system_ffmpeg = shutil.which("ffmpeg")
+if _system_ffmpeg and "IMAGEIO_FFMPEG_EXE" not in os.environ:
+    os.environ["IMAGEIO_FFMPEG_EXE"] = _system_ffmpeg
 
 from src.audio.tts import generate_narration
 from src.config import format_profile, local_run_date, run_output_dir

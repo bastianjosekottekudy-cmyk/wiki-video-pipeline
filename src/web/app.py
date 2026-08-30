@@ -37,6 +37,7 @@ app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="stati
 
 _running_lock = threading.Lock()
 _running_jobs: set[str] = set()
+_generate_semaphore = threading.Semaphore(4)
 _upload_lock = threading.Lock()
 _uploading_runs: set[int] = set()
 
@@ -578,12 +579,13 @@ async def api_generate(
         with _running_lock:
             _running_jobs.add(key)
         try:
-            run_topic(
-                topic,
-                fmt,
-                skip_upload=not _youtube_enabled(),
-                mock=mock,
-            )
+            with _generate_semaphore:
+                run_topic(
+                    topic,
+                    fmt,
+                    skip_upload=not _youtube_enabled(),
+                    mock=mock,
+                )
         except Exception:
             logger.exception("Background generate failed for %s %s", fmt, topic)
         finally:
