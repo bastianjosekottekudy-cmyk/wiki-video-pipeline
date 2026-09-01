@@ -1,62 +1,78 @@
 # Wiki Video Pipeline
 
-Topic → English Wikipedia → interesting narration → local MP4 → optional YouTube upload.
+Topic → English Wikipedia → Deep Synchronized Narration → Local MP4 → Optional YouTube Upload.
 
-Same **LLM chain** and **YouTube OAuth clients** as [news-shorts-pipeline](../news-shorts-pipeline).
+Supports both **Short (9:16 vertical)** and **Full Documentary Video (16:9 widescreen)** formats.
 
-## Formats
+---
 
-- **Short** — 1080×1920, YouTube Shorts ceiling 180s
-- **Video** — 1920×1080, duration follows the story
+## 🎙️ Narration & Synchronization
 
-Dashboard: **http://127.0.0.1:8082**
+* **Primary Engine**: **Google Cloud Text-to-Speech (Chirp 3 HD)**
+  * Voice: `en-US-Chirp3-HD-Fenrir` (Deep, calm, documentary narrator voice).
+  * High-definition expressive speech with human-like breathing and natural pauses.
+* **Backup Engine**: **Microsoft Edge-TTS**
+  * Voice: `en-US-ChristopherNeural` (Pitch: `-8Hz`, Rate: `-4%`).
+  * Automatic zero-cost fallback if GCP credentials/quota are unavailable.
+* **Synchronization**: Frame-accurate chapter slide and imagery synchronization via `narration_segments.json`.
 
-## Prerequisites (Windows)
+---
 
-1. **Python 3.11+**
-2. **FFmpeg**
-3. LLM keys via the personal **llm-chain** skill
-4. YouTube secrets via the personal **google-auth** skill
+## 📦 Installation & Setup
 
-## Quick Start
+### 1. Prerequisites
+* **Python 3.11+**
+* **FFmpeg & ffprobe** (`sudo pacman -S ffmpeg` or `sudo apt install ffmpeg`)
 
-```powershell
-cd C:\Users\USER\Projects\wiki-video-pipeline
-.\scripts\setup-windows.ps1
-.\scripts\run.ps1
+### 2. Environment Setup
+
+```bash
+# Create and activate virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-Open **http://127.0.0.1:8082**. Type a topic and generate a Short or a Video.
+### 3. Configure API Keys
 
-Start in the background and with Windows (same pattern as news-shorts):
-
-```powershell
-.\scripts\restart-app.ps1 -Background
-.\scripts\restart-app.ps1 -RegisterStartup
+Copy `.env.example` to `.env`:
+```bash
+cp .env.example .env
 ```
 
-## CLI
-
-```powershell
-.\.venv\Scripts\python.exe -m src.pipeline --topic "Voyager 1" --format short
-.\.venv\Scripts\python.exe -m src.pipeline --topic "Voyager 1" --format video --upload
-.\.venv\Scripts\python.exe -m src.pipeline --topic "Black holes" --format short --mock
+Ensure your `GOOGLE_API_KEY` is present in `.env`:
+```ini
+GOOGLE_API_KEY=AIzaSyAbVP...
+GROQ_API_KEY=gsk_...
 ```
 
-## Secrets
+---
 
-```powershell
-python "$env:USERPROFILE\.cursor\skills\llm-chain\scripts\sync_env.py" --project .
-python "$env:USERPROFILE\.cursor\skills\llm-chain\scripts\install_module.py" --project . --package src.llm
-python "$env:USERPROFILE\.cursor\skills\google-auth\scripts\sync.py" --project . --service youtube --write-yaml
+## 🚀 Running the Pipeline
+
+### Start Web Dashboard
+```bash
+# Run server at http://127.0.0.1:8082
+python3 -m src.main
 ```
 
-Authorize each YouTube client once if needed:
+### Manual Trigger CLI
+```bash
+# Generate 9:16 Short on a topic
+python3 -m src.pipeline --topic "Voyager 1" --format short
 
-```powershell
-.\.venv\Scripts\python.exe -m src.youtube.auth --client primary
+# Generate 16:9 Full Documentary Video
+python3 -m src.pipeline --topic "James Webb Space Telescope" --format video
+
+# Test run with mock assets
+python3 -m src.pipeline --topic "Quantum computing" --format short --mock
 ```
 
-## License
+---
 
-Narration is adapted from Wikipedia (CC BY-SA 4.0). Uploads use YouTube’s Creative Commons license and credit the article plus image authors in the description.
+## ⚙️ Configuration Files
+
+* **`config/pipeline.yaml`**: Video dimensions (9:16 and 16:9 profiles), TTS voice presets, and YouTube upload metadata.
+* **`.env`**: API keys for Google Cloud TTS, LLMs, and YouTube tokens.

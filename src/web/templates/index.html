@@ -158,7 +158,7 @@
           {% if run.is_uploaded and run.youtube_url %}
           <p class="meta yt-link"><a href="{{ run.youtube_url }}" target="_blank" rel="noopener">Watch on YouTube</a></p>
           {% elif run.upload_status == 'failed' and run.upload_error %}
-          <p class="meta upload-error">Upload failed — retry below or wait for the hourly retry</p>
+          <p class="meta upload-error">Upload failed — retry below or wait for the 6-hour retry</p>
           {% elif run.upload_status == 'uploading' %}
           <p class="meta">Uploading to YouTube…</p>
           {% endif %}

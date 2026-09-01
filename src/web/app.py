@@ -238,19 +238,19 @@ def _upload_run_video(run_id: int) -> None:
 
 
 def _retry_failed_uploads() -> None:
-    """Re-attempt YouTube uploads that previously failed (only when any exist)."""
+    """Re-attempt YouTube uploads that previously failed (capped to at most 10 per schedule)."""
     from src.scheduler import sync_failed_upload_retry_job
 
     if not _youtube_enabled():
         sync_failed_upload_retry_job()
         return
 
-    failed = store.list_failed_uploads()
+    failed = store.list_failed_uploads(limit=10)
     if not failed:
         sync_failed_upload_retry_job()
         return
 
-    logger.info("Retrying %s failed YouTube upload(s)", len(failed))
+    logger.info("Retrying %s failed YouTube upload(s) (limit 10)", len(failed))
     for run in failed:
         run_id = int(run["id"])
         if run.get("status") == "running":
@@ -268,17 +268,17 @@ def _retry_failed_uploads() -> None:
             _uploading_runs.add(run_id)
 
         store.set_upload_status(run_id, "uploading", upload_error=None)
-        store.append_step_log(run_id, "upload", "Hourly retry of failed upload")
+        store.append_step_log(run_id, "upload", "Scheduled 6h retry of failed upload")
         try:
             _upload_run_video(run_id)
         except Exception:
-            logger.exception("Hourly upload retry failed for run %s", run_id)
+            logger.exception("Scheduled 6h upload retry failed for run %s", run_id)
             current = store.get_run(run_id)
             if current and (current.get("upload_status") or "") == "uploading":
                 store.set_upload_status(
                     run_id,
                     "failed",
-                    upload_error="Hourly retry crashed unexpectedly",
+                    upload_error="6h retry crashed unexpectedly",
                 )
         finally:
             with _upload_lock:

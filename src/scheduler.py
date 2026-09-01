@@ -1,4 +1,4 @@
-"""Conditional hourly retry of failed YouTube uploads (no daily generate jobs)."""
+"""Conditional 6-hour retry of failed YouTube uploads (no daily generate jobs)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from apscheduler.triggers.interval import IntervalTrigger
 logger = logging.getLogger(__name__)
 
 UPLOAD_RETRY_JOB_ID = "retry-failed-uploads"
-UPLOAD_RETRY_INTERVAL_HOURS = 1
+UPLOAD_RETRY_INTERVAL_HOURS = 6
+UPLOAD_RETRY_MAX_BATCH_SIZE = 10
 
 _scheduler: BackgroundScheduler | None = None
 _retry_uploads_callback: Callable[[], None] | None = None
@@ -25,7 +26,7 @@ def _format_local(dt: datetime) -> str:
 
 def sync_failed_upload_retry_job(*, run_in_hours: float | None = None) -> None:
     """
-    Keep the hourly retry job only while failed uploads exist.
+    Keep the 6-hour retry job only while failed uploads exist.
     Does nothing if the scheduler or retry callback is not ready.
     """
     if not _scheduler or not _scheduler.running or _retry_uploads_callback is None:

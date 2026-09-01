@@ -15,7 +15,11 @@ import uvicorn
 
 from src.config import load_pipeline_config
 from src.db import store
-from src.scheduler import shutdown_scheduler, start_scheduler
+from src.scheduler import (
+    UPLOAD_RETRY_INTERVAL_HOURS,
+    shutdown_scheduler,
+    start_scheduler,
+)
 from src.web.app import _retry_failed_uploads, app
 
 logger = logging.getLogger(__name__)
@@ -45,8 +49,9 @@ def main() -> None:
     failed_uploads = store.count_failed_uploads()
     if failed_uploads:
         logger.info(
-            "%s failed YouTube upload(s) pending — retry job armed (hourly while failures remain)",
+            "%s failed YouTube upload(s) pending — retry job armed (every %sh, max 10 per run while failures remain)",
             failed_uploads,
+            UPLOAD_RETRY_INTERVAL_HOURS,
         )
     else:
         logger.info("No failed YouTube uploads — retry job not scheduled")

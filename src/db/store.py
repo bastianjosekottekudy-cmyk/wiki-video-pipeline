@@ -268,8 +268,8 @@ def list_run_dates() -> list[str]:
         return [row[0] for row in rows]
 
 
-def list_failed_uploads(limit: int = 100) -> list[dict[str, Any]]:
-    """Runs whose YouTube upload failed and still need a retry."""
+def list_failed_uploads(limit: int = 10) -> list[dict[str, Any]]:
+    """Runs whose YouTube upload failed and still need a retry (capped to limit, default 10)."""
     with db() as conn:
         rows = conn.execute(
             """
