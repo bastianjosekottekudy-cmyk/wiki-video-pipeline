@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import logging
 import os
 import shutil
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -249,7 +251,7 @@ def run_scheduled_shorts_batch(
     Generate and upload a batch of random configured shorts.
     Picks un-uploaded topics, runs short pipeline, and uploads to YouTube.
     """
-    from src.config import load_schedule_config
+    from src.config import load_execution_config, load_schedule_config
     from src.topics.discovery import pick_random_topics
 
     sched = load_schedule_config()
@@ -258,8 +260,16 @@ def run_scheduled_shorts_batch(
     if auto_upload is None:
         auto_upload = bool(sched.get("auto_upload", True))
 
+    exec_cfg = load_execution_config()
+    max_workers = int(exec_cfg.get("max_concurrent_jobs", 5))
+
     topics = pick_random_topics(count)
-    logger.info("Starting scheduled shorts batch for %d topic(s): %s", len(topics), topics)
+    logger.info(
+        "Starting scheduled shorts batch for %d topic(s) (concurrency: %d): %s",
+        len(topics),
+        max_workers,
+        topics,
+    )
     completed_run_ids: list[int] = []
 
     run_date = local_run_date()
@@ -273,18 +283,18 @@ def run_scheduled_shorts_batch(
         queued_items.append((rid, topic))
         logger.info("Pre-created queued run %s for topic %r", rid, topic)
 
-    for rid, topic in queued_items:
+    def _process_item(rid: int, topic: str) -> int | None:
         try:
             check_stop(rid, topic)
         except JobStoppedError:
-            logger.info("Scheduled shorts batch cancelled by stop request")
+            logger.info("Run %s (%r) stopped by user while queued", rid, topic)
             store.stop_run(rid, reason="Stopped by user while queued")
-            break
+            return None
 
         curr = store.get_run(rid)
         if curr and curr.get("status") == "stopped":
             logger.info("Run %s was stopped while queued; skipping", rid)
-            continue
+            return None
 
         try:
             logger.info("Scheduled batch: starting short for %r (run #%s)...", topic, rid)
@@ -297,15 +307,43 @@ def run_scheduled_shorts_batch(
                 mock=mock,
                 existing_run_id=rid,
             )
-            completed_run_ids.append(run_id)
             logger.info("Scheduled batch: completed run %s for %r", run_id, topic)
+            return run_id
         except JobStoppedError:
-            logger.warning("Scheduled batch stopped during topic %r (run %s)", topic, rid)
-            break
+            logger.warning("Scheduled batch run %s stopped for topic %r", rid, topic)
+            return None
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Scheduled batch failed for topic %r: %s", topic, exc)
+            logger.exception("Scheduled batch failed for topic %r (run %s): %s", topic, rid, exc)
+            return None
 
-    # Cancel any remaining runs in queued_items that were never reached if stopped
+    if max_workers > 1 and len(queued_items) > 1:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="batch_short"
+        ) as executor:
+            future_to_item = {
+                executor.submit(_process_item, rid, topic): (rid, topic)
+                for rid, topic in queued_items
+            }
+            for future in concurrent.futures.as_completed(future_to_item):
+                rid, topic = future_to_item[future]
+                try:
+                    res = future.result()
+                    if res is not None:
+                        completed_run_ids.append(res)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception(
+                        "Worker thread for run %s (%r) raised unexpected exception: %s",
+                        rid,
+                        topic,
+                        exc,
+                    )
+    else:
+        for rid, topic in queued_items:
+            res = _process_item(rid, topic)
+            if res is not None:
+                completed_run_ids.append(res)
+
+    # Cancel any remaining runs in queued_items that were never reached or finished
     for rem_id, rem_topic in queued_items:
         if rem_id not in completed_run_ids:
             run_data = store.get_run(rem_id)

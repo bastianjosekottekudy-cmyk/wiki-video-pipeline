@@ -1,3 +1,5 @@
+concurrency_enabled: true
+max_parallel_jobs: 5
 web:
   host: 127.0.0.1
   port: 8082

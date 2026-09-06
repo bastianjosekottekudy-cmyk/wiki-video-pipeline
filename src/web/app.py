@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import shutil
@@ -22,8 +23,11 @@ from pydantic import BaseModel, Field
 from src.config import (
     OUTPUT_DIR,
     add_topic_to_pool,
+    load_execution_config,
+    load_pipeline_concurrency,
     load_pipeline_config,
     load_schedule_config,
+    update_pipeline_concurrency,
     update_schedule_config,
 )
 from src.db import store
@@ -48,9 +52,55 @@ app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="stati
 
 _running_lock = threading.Lock()
 _running_jobs: set[str] = set()
-_generate_semaphore = threading.Semaphore(4)
 _upload_lock = threading.Lock()
 _uploading_runs: set[int] = set()
+
+
+class ConcurrencyLimiter:
+    """Thread-safe dynamic concurrency limiter supporting runtime limit updates."""
+
+    def __init__(self, limit: int = 5):
+        self._lock = threading.Lock()
+        self._cv = threading.Condition(self._lock)
+        self._active = 0
+        self._limit = max(1, int(limit))
+
+    @property
+    def limit(self) -> int:
+        with self._lock:
+            return self._limit
+
+    @property
+    def active_count(self) -> int:
+        with self._lock:
+            return self._active
+
+    def set_limit(self, new_limit: int) -> None:
+        with self._cv:
+            self._limit = max(1, int(new_limit))
+            self._cv.notify_all()
+
+    def acquire(self) -> None:
+        with self._cv:
+            while self._active >= self._limit:
+                self._cv.wait()
+            self._active += 1
+
+    def release(self) -> None:
+        with self._cv:
+            self._active = max(0, self._active - 1)
+            self._cv.notify_all()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+
+
+_concurrency_init = load_pipeline_concurrency()
+_generate_semaphore = ConcurrencyLimiter(_concurrency_init["effective_limit"])
 
 
 class ScheduleUpdateIn(BaseModel):
@@ -80,10 +130,9 @@ def _scheduled_daily_shorts() -> None:
 
     def _bg() -> None:
         try:
-            with _generate_semaphore:
-                from src.pipeline import run_scheduled_shorts_batch
+            from src.pipeline import run_scheduled_shorts_batch
 
-                run_scheduled_shorts_batch()
+            run_scheduled_shorts_batch()
         except Exception as exc:  # noqa: BLE001
             logger.exception("Scheduled daily shorts batch failed: %s", exc)
         finally:
@@ -379,6 +428,7 @@ async def index(
         except Exception as exc:  # noqa: BLE001
             logger.warning("YouTube client probe failed: %s", exc)
             youtube_clients = []
+    conc = load_pipeline_concurrency()
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -391,6 +441,9 @@ async def index(
             "has_running": has_running,
             "has_queued": has_queued,
             "has_uploading": has_uploading,
+            "concurrency_enabled": conc["concurrency_enabled"],
+            "max_parallel_jobs": conc["max_parallel_jobs"],
+            "effective_concurrency": _generate_semaphore.limit,
             "youtube_enabled": youtube_on,
             "youtube_clients": youtube_clients,
             "youtube_auth_warning": any(
@@ -728,26 +781,26 @@ def api_retry_failed(
         from src.job_control import JobStoppedError, check_stop
         from src.pipeline import retry_single_topic
 
-        for rid, topic, fmt in runs_to_retry:
+        def _retry_one(rid: int, topic: str, fmt: str) -> None:
             key = _job_key(topic, fmt)
             try:
                 check_stop(rid, topic)
             except JobStoppedError:
-                logger.info("Batch retry cancelled by stop request")
+                logger.info("Batch retry stopped by user for run %s (%r)", rid, topic)
                 store.stop_run(rid, reason="Stopped by user while queued")
-                break
+                return
 
             curr = store.get_run(rid)
             if curr and curr.get("status") == "stopped":
                 logger.info("Retry run %s was stopped while queued; skipping", rid)
-                continue
+                return
 
             with _generate_semaphore:
                 try:
                     check_stop(rid, topic)
                     with _running_lock:
                         if key in _running_jobs:
-                            continue
+                            return
                         _running_jobs.add(key)
                     retry_single_topic(
                         rid,
@@ -757,12 +810,25 @@ def api_retry_failed(
                 except JobStoppedError:
                     logger.info("Queued retry %s for %s stopped by user", rid, topic)
                     store.stop_run(rid, reason="Stopped by user")
-                    break
                 except Exception:
                     logger.exception("Batch retry failed for run %s", rid)
                 finally:
                     with _running_lock:
                         _running_jobs.discard(key)
+
+        effective_limit = _generate_semaphore.limit
+        if effective_limit > 1 and len(runs_to_retry) > 1:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=effective_limit, thread_name_prefix="retry_failed"
+            ) as executor:
+                futures = [
+                    executor.submit(_retry_one, rid, topic, fmt)
+                    for rid, topic, fmt in runs_to_retry
+                ]
+                concurrent.futures.wait(futures)
+        else:
+            for rid, topic, fmt in runs_to_retry:
+                _retry_one(rid, topic, fmt)
 
     background_tasks.add_task(_bg_batch_retry)
     return JSONResponse({
@@ -860,6 +926,72 @@ async def api_generate(
     return JSONResponse({"status": "queued", "run_id": rid, "topic": topic, "format": fmt})
 
 
+@app.get("/api/concurrency")
+async def api_get_concurrency() -> JSONResponse:
+    state = load_pipeline_concurrency()
+    return JSONResponse(
+        {
+            "ok": True,
+            "status": "ok",
+            "enabled": state["concurrency_enabled"],
+            "max_parallel_jobs": state["max_parallel_jobs"],
+            "effective_limit": _generate_semaphore.limit,
+            "active_jobs": _generate_semaphore.active_count,
+        }
+    )
+
+
+@app.post("/api/concurrency")
+async def api_set_concurrency(request: Request) -> JSONResponse:
+    payload: dict[str, Any] = {}
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+    else:
+        try:
+            form = await request.form()
+            for k, v in form.items():
+                payload[k] = v
+        except Exception:
+            payload = {}
+
+    enabled: bool | None = None
+    if "enabled" in payload:
+        val = payload["enabled"]
+        if isinstance(val, bool):
+            enabled = val
+        elif isinstance(val, str):
+            enabled = val.strip().lower() in ("true", "1", "on", "yes")
+
+    max_parallel_jobs: int | None = None
+    if "max_parallel_jobs" in payload:
+        try:
+            max_parallel_jobs = int(payload["max_parallel_jobs"])
+        except (ValueError, TypeError):
+            pass
+
+    updated = update_pipeline_concurrency(
+        enabled=enabled,
+        max_parallel=max_parallel_jobs,
+    )
+    _generate_semaphore.set_limit(updated["effective_limit"])
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "status": "ok",
+            "message": "Concurrency settings updated",
+            "enabled": updated["concurrency_enabled"],
+            "max_parallel_jobs": updated["max_parallel_jobs"],
+            "effective_limit": updated["effective_limit"],
+            "active_jobs": _generate_semaphore.active_count,
+        }
+    )
+
+
 @app.get("/api/schedule")
 async def api_get_schedule() -> JSONResponse:
     """Get current schedule status, next run times, and topic count."""
@@ -924,12 +1056,11 @@ async def api_schedule_run_now(
 
     def _bg(run_count: int, upload_flag: bool) -> None:
         try:
-            with _generate_semaphore:
-                from src.pipeline import run_scheduled_shorts_batch
+            from src.pipeline import run_scheduled_shorts_batch
 
-                run_scheduled_shorts_batch(
-                    count=run_count, auto_upload=upload_flag
-                )
+            run_scheduled_shorts_batch(
+                count=run_count, auto_upload=upload_flag
+            )
         except Exception:
             logger.exception("Manual run-now batch failed")
         finally:

@@ -16,6 +16,17 @@
       <p class="subtitle">Topic → Wikipedia → narration{% if youtube_enabled %} · YouTube upload on{% endif %}</p>
     </div>
     <div class="header-actions">
+      <div class="concurrency-widget" id="concurrency-widget">
+        <label class="toggle" title="Enable or disable concurrent execution">
+          <input type="checkbox" id="concurrency-toggle" {% if concurrency_enabled %}checked{% endif %} onchange="updateConcurrency()">
+          <span>Concurrency</span>
+        </label>
+        <div class="concurrency-max-wrap" id="concurrency-max-wrap" {% if not concurrency_enabled %}style="display: none;"{% endif %}>
+          <label for="concurrency-max" class="concurrency-label">Max:</label>
+          <input type="number" id="concurrency-max" min="1" max="20" value="{{ max_parallel_jobs }}" onchange="updateConcurrency()" onkeydown="if(event.key==='Enter')updateConcurrency()" class="concurrency-input" title="Maximum concurrent jobs">
+        </div>
+        <span id="concurrency-status-msg" class="concurrency-status-msg"></span>
+      </div>
       <label class="toggle">
         <input type="checkbox" id="mock-toggle">
         <span>Mock data</span>
@@ -48,7 +59,16 @@
 
   <section class="panel generate-panel">
     <div class="panel-head">
-      <h2>Generate</h2>
+      <div class="panel-head-row">
+        <h2>Generate</h2>
+        <span class="concurrency-badge {% if not concurrency_enabled %}sequential{% endif %}" id="concurrency-badge">
+          {% if concurrency_enabled %}
+          ⚡ Concurrency: {{ max_parallel_jobs }} max
+          {% else %}
+          ⏸ Sequential (1 at a time)
+          {% endif %}
+        </span>
+      </div>
       <p class="hint">
         Shorts are 9:16, up to 3 minutes. Videos are 16:9 and as long as the story needs.
         Narration is adapted from the English Wikipedia article for your topic.
@@ -279,6 +299,54 @@
   </section>
 
   <script>
+    async function updateConcurrency() {
+      const toggle = document.getElementById('concurrency-toggle');
+      const maxInput = document.getElementById('concurrency-max');
+      const maxWrap = document.getElementById('concurrency-max-wrap');
+      const statusMsg = document.getElementById('concurrency-status-msg');
+      const badge = document.getElementById('concurrency-badge');
+
+      const enabled = toggle ? toggle.checked : true;
+      let maxVal = parseInt(maxInput ? maxInput.value : 5, 10);
+      if (isNaN(maxVal) || maxVal < 1) maxVal = 1;
+      if (maxVal > 20) maxVal = 20;
+      if (maxInput) maxInput.value = maxVal;
+
+      if (maxWrap) {
+        maxWrap.style.display = enabled ? 'inline-flex' : 'none';
+      }
+
+      try {
+        const res = await fetch('/api/concurrency', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: enabled, max_parallel_jobs: maxVal }),
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+          if (statusMsg) {
+            statusMsg.textContent = 'Saved!';
+            statusMsg.className = 'concurrency-status-msg success';
+            setTimeout(() => { if (statusMsg.textContent === 'Saved!') statusMsg.textContent = ''; }, 2000);
+          }
+          if (badge) {
+            badge.textContent = data.enabled ? `⚡ Concurrency: ${data.max_parallel_jobs} max` : '⏸ Sequential (1 at a time)';
+            badge.className = data.enabled ? 'concurrency-badge' : 'concurrency-badge sequential';
+          }
+        } else {
+          if (statusMsg) {
+            statusMsg.textContent = data.detail || 'Error saving';
+            statusMsg.className = 'concurrency-status-msg error';
+          }
+        }
+      } catch (err) {
+        if (statusMsg) {
+          statusMsg.textContent = 'Network error';
+          statusMsg.className = 'concurrency-status-msg error';
+        }
+      }
+    }
+
     async function generate(fmt) {
       const status = document.getElementById('trigger-status');
       const topic = (document.getElementById('topic-input').value || '').trim();

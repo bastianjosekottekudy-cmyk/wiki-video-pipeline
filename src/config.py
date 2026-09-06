@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ DEFAULT_SCHEDULE_HOUR = 20
 DEFAULT_SCHEDULE_MINUTE = 0
 DEFAULT_SCHEDULE_TIMEZONE = TIMEZONE
 DEFAULT_DAILY_TOPICS_COUNT = 1
+DEFAULT_MAX_CONCURRENT_JOBS = 5
 
 
 def load_pipeline_config() -> dict[str, Any]:
@@ -122,6 +124,70 @@ def add_topic_to_pool(topic: str) -> list[str]:
 
 def get_env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
+
+
+def load_pipeline_concurrency() -> dict[str, Any]:
+    cfg = load_pipeline_config()
+    enabled = bool(cfg.get("concurrency_enabled", True))
+    max_parallel = max(1, int(cfg.get("max_parallel_jobs", DEFAULT_MAX_CONCURRENT_JOBS)))
+    return {
+        "concurrency_enabled": enabled,
+        "max_parallel_jobs": max_parallel,
+        "effective_limit": max_parallel if enabled else 1,
+    }
+
+
+def update_pipeline_concurrency(
+    *,
+    enabled: bool | None = None,
+    max_parallel: int | None = None,
+) -> dict[str, Any]:
+    path = CONFIG_DIR / "pipeline.yaml"
+    text = path.read_text(encoding="utf-8")
+
+    if enabled is not None:
+        val_str = "true" if enabled else "false"
+        if re.search(r"^concurrency_enabled\s*:.*$", text, flags=re.MULTILINE):
+            text = re.sub(
+                r"^concurrency_enabled\s*:.*$",
+                f"concurrency_enabled: {val_str}",
+                text,
+                flags=re.MULTILINE,
+            )
+        else:
+            if re.search(r"^max_parallel_jobs\s*:.*$", text, flags=re.MULTILINE):
+                text = re.sub(
+                    r"^(max_parallel_jobs\s*:.*)$",
+                    rf"\1\nconcurrency_enabled: {val_str}",
+                    text,
+                    flags=re.MULTILINE,
+                )
+            else:
+                text = f"concurrency_enabled: {val_str}\n" + text
+
+    if max_parallel is not None:
+        clamped = min(max(int(max_parallel), 1), 20)
+        if re.search(r"^max_parallel_jobs\s*:.*$", text, flags=re.MULTILINE):
+            text = re.sub(
+                r"^max_parallel_jobs\s*:.*$",
+                f"max_parallel_jobs: {clamped}",
+                text,
+                flags=re.MULTILINE,
+            )
+        else:
+            text = f"max_parallel_jobs: {clamped}\n" + text
+
+    path.write_text(text, encoding="utf-8")
+    return load_pipeline_concurrency()
+
+
+def load_execution_config() -> dict[str, Any]:
+    conc = load_pipeline_concurrency()
+    return {
+        "max_concurrent_jobs": conc["effective_limit"],
+        "concurrency_enabled": conc["concurrency_enabled"],
+        "max_parallel_jobs": conc["max_parallel_jobs"],
+    }
 
 
 def local_run_date() -> str:
