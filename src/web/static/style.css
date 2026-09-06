@@ -484,3 +484,103 @@ a { color: #7eb6ff; }
   body { padding: 1rem; }
   .site-header { flex-direction: column; }
 }
+
+/* Schedule and Topics Panel */
+.schedule-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: center;
+  background: #0b1220;
+  padding: 1rem;
+  border-radius: 8px;
+  border: 1px solid #22304a;
+  margin-bottom: 0.85rem;
+}
+
+.schedule-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.schedule-field label {
+  font-size: 0.78rem;
+  color: #7b8fa8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.schedule-input {
+  background: #121a2b;
+  color: #e8eef7;
+  border: 1px solid #2a3a55;
+  padding: 0.45rem 0.65rem;
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+
+.schedule-input:focus {
+  border-color: #2563eb;
+  outline: none;
+}
+
+.schedule-meta-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+  margin-bottom: 0.85rem;
+}
+
+.schedule-topics-box {
+  margin-top: 0.85rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid #22304a;
+}
+
+.schedule-topics-box summary {
+  cursor: pointer;
+  color: #7eb6ff;
+  font-size: 0.88rem;
+  user-select: none;
+}
+
+.schedule-topics-box summary:hover {
+  text-decoration: underline;
+}
+
+.pool-add-row {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+  flex-wrap: wrap;
+}
+
+.pool-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  max-height: 140px;
+  overflow-y: auto;
+  padding: 0.4rem;
+  background: #0b1220;
+  border-radius: 6px;
+  border: 1px solid #1e293b;
+}
+
+.pool-chip {
+  display: inline-block;
+  font-size: 0.78rem;
+  padding: 0.2rem 0.55rem;
+  background: #1e293b;
+  border-radius: 999px;
+  color: #cbd5e1;
+}
+
+.pool-chip.uploaded {
+  text-decoration: line-through;
+  opacity: 0.5;
+  background: #182234;
+}
+

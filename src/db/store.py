@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -64,6 +65,17 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS uploaded_topics (
+                topic_norm TEXT PRIMARY KEY,
+                topic_display TEXT NOT NULL,
+                wiki_title TEXT,
+                uploaded_at TEXT NOT NULL,
+                run_id INTEGER
+            )
+            """
+        )
         for column, decl in (
             ("format", "TEXT"),
             ("topic", "TEXT"),
@@ -74,6 +86,42 @@ def init_db() -> None:
             ("upload_error", "TEXT"),
         ):
             _ensure_column(conn, "runs", column, decl)
+
+        # Seed uploaded_topics from existing runs that succeeded, are running, or had upload attempts
+        existing_runs = conn.execute(
+            """
+            SELECT id, topic, wiki_title, finished_at, started_at, run_date
+            FROM runs
+            WHERE (status IN ('success', 'running')
+                   OR upload_status IN ('uploaded', 'uploading', 'failed')
+                   OR (youtube_video_id IS NOT NULL AND youtube_video_id != ''))
+              AND topic IS NOT NULL AND TRIM(topic) != ''
+            """
+        ).fetchall()
+        for r in existing_runs:
+            run_id = r[0]
+            topic_str = str(r[1] or "").strip()
+            wiki_title_str = str(r[2] or "").strip() or None
+            ts = r[3] or r[4] or r[5] or datetime.now(timezone.utc).isoformat()
+            norm_t = normalize_topic_key(topic_str)
+            if norm_t:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO uploaded_topics (topic_norm, topic_display, wiki_title, uploaded_at, run_id)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (norm_t, topic_str, wiki_title_str, ts, run_id),
+                )
+            if wiki_title_str:
+                norm_w = normalize_topic_key(wiki_title_str)
+                if norm_w and norm_w != norm_t:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO uploaded_topics (topic_norm, topic_display, wiki_title, uploaded_at, run_id)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (norm_w, wiki_title_str, wiki_title_str, ts, run_id),
+                    )
         conn.commit()
 
 
@@ -327,3 +375,102 @@ def count_runs_today() -> dict[str, int]:
         "running": running,
         "uploading": uploading,
     }
+
+
+def normalize_topic_key(topic: str) -> str:
+    """Normalize topic for collision-free comparison (casing, punctuation, spacing)."""
+    if not topic:
+        return ""
+    cleaned = re.sub(r"[^\w\s]", " ", topic.lower().strip())
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def record_uploaded_topic(
+    topic: str,
+    wiki_title: str | None = None,
+    run_id: int | None = None,
+) -> None:
+    """Persist an uploaded topic and its canonical wiki title to prevent repeats."""
+    now = datetime.now(timezone.utc).isoformat()
+    norm_topic = normalize_topic_key(topic)
+    if not norm_topic:
+        return
+
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO uploaded_topics (topic_norm, topic_display, wiki_title, uploaded_at, run_id)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (norm_topic, topic.strip(), (wiki_title or "").strip() or None, now, run_id),
+        )
+        if wiki_title:
+            norm_wiki = normalize_topic_key(wiki_title)
+            if norm_wiki and norm_wiki != norm_topic:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO uploaded_topics (topic_norm, topic_display, wiki_title, uploaded_at, run_id)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (norm_wiki, wiki_title.strip(), wiki_title.strip(), now, run_id),
+                )
+
+
+def get_uploaded_topics() -> set[str]:
+    """Return set of normalized topic keys and wiki titles that have been uploaded or used."""
+    with db() as conn:
+        seen: set[str] = set()
+        # 1. From uploaded_topics table
+        rows = conn.execute("SELECT topic_norm, wiki_title FROM uploaded_topics").fetchall()
+        for r in rows:
+            if r[0]:
+                seen.add(r[0])
+            if r[1]:
+                norm_w = normalize_topic_key(r[1])
+                if norm_w:
+                    seen.add(norm_w)
+
+        # 2. From runs table (any run that succeeded, is running, or has upload history)
+        runs = conn.execute(
+            """
+            SELECT topic, wiki_title FROM runs
+            WHERE (status IN ('success', 'running')
+                   OR upload_status IN ('uploaded', 'uploading', 'failed')
+                   OR (youtube_video_id IS NOT NULL AND youtube_video_id != ''))
+              AND topic IS NOT NULL AND TRIM(topic) != ''
+            """
+        ).fetchall()
+        for r in runs:
+            norm_t = normalize_topic_key(r[0])
+            if norm_t:
+                seen.add(norm_t)
+            if r[1]:
+                norm_w = normalize_topic_key(r[1])
+                if norm_w:
+                    seen.add(norm_w)
+
+        return seen
+
+
+def is_topic_uploaded(topic: str) -> bool:
+    """Check if a topic or title was previously uploaded."""
+    norm = normalize_topic_key(topic)
+    if not norm:
+        return False
+    return norm in get_uploaded_topics()
+
+
+def list_uploaded_topics(limit: int = 100) -> list[dict[str, Any]]:
+    """Return most recently uploaded topics."""
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT topic_display, wiki_title, uploaded_at, run_id
+            FROM uploaded_topics
+            ORDER BY uploaded_at DESC, rowid DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+

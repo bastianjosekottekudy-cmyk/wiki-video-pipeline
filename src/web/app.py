@@ -13,17 +13,28 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
 
-from src.config import OUTPUT_DIR, load_pipeline_config
+from src.config import (
+    OUTPUT_DIR,
+    add_topic_to_pool,
+    load_pipeline_config,
+    load_schedule_config,
+    update_schedule_config,
+)
 from src.db import store
 from src.naming import title_from_video_path
+from src.scheduler import get_schedule_status, reload_daily_job
+from src.topics import get_topics_status
 from src.youtube.auth import (
     authorize_client_interactive,
+    get_auth_session_status,
     probe_youtube_clients,
+    start_auth_session,
     try_silent_refresh,
 )
 
@@ -40,6 +51,46 @@ _running_jobs: set[str] = set()
 _generate_semaphore = threading.Semaphore(4)
 _upload_lock = threading.Lock()
 _uploading_runs: set[int] = set()
+
+
+class ScheduleUpdateIn(BaseModel):
+    enabled: bool | None = None
+    hour: int | None = Field(default=None, ge=0, le=23)
+    minute: int | None = Field(default=None, ge=0, le=59)
+    daily_topics_count: int | None = Field(default=None, ge=1, le=20)
+    auto_upload: bool | None = None
+
+
+class ScheduleRunNowIn(BaseModel):
+    count: int | None = Field(default=None, ge=1, le=20)
+    auto_upload: bool | None = None
+
+
+class TopicPoolAddIn(BaseModel):
+    topic: str
+
+
+def _scheduled_daily_shorts() -> None:
+    """Invoked by APScheduler daily cron trigger."""
+    with _running_lock:
+        if "daily_batch" in _running_jobs:
+            logger.warning("Daily batch shorts already running; skipping duplicate trigger")
+            return
+        _running_jobs.add("daily_batch")
+
+    def _bg() -> None:
+        try:
+            with _generate_semaphore:
+                from src.pipeline import run_scheduled_shorts_batch
+
+                run_scheduled_shorts_batch()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Scheduled daily shorts batch failed: %s", exc)
+        finally:
+            with _running_lock:
+                _running_jobs.discard("daily_batch")
+
+    threading.Thread(target=_bg, daemon=True).start()
 
 
 def _youtube_enabled() -> bool:
@@ -340,6 +391,11 @@ async def index(
                 c.get("status") != "ok" for c in youtube_clients
             ),
             "youtube_flash": youtube_flash or "",
+            "schedule": {
+                **get_schedule_status(),
+                "is_running": "daily_batch" in _running_jobs,
+            },
+            "topics": get_topics_status(),
         },
     )
 
@@ -385,53 +441,66 @@ async def youtube_client_refresh(client_id: str) -> JSONResponse:
     return JSONResponse(result)
 
 
-@app.post("/api/youtube/clients/{client_id}/authorize")
-async def youtube_client_authorize(client_id: str) -> JSONResponse:
+@app.get("/api/youtube/clients/{client_id}/auth-status")
+async def youtube_client_auth_status(client_id: str) -> JSONResponse:
+    """Check status of an active or recent interactive OAuth session."""
     if not _youtube_enabled():
         raise HTTPException(status_code=400, detail="YouTube upload is disabled")
     try:
-        result = await asyncio.to_thread(authorize_client_interactive, client_id)
+        return JSONResponse(get_auth_session_status(client_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/youtube/clients/{client_id}/start-auth")
+async def youtube_client_start_auth(client_id: str) -> JSONResponse:
+    """Start loopback listener with timeout and return auth_url for browser."""
+    if not _youtube_enabled():
+        raise HTTPException(status_code=400, detail="YouTube upload is disabled")
+    try:
+        return JSONResponse(start_auth_session(client_id))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("YouTube authorize failed for %s: %s", client_id, exc)
+
+
+@app.post("/api/youtube/clients/{client_id}/authorize")
+async def youtube_client_authorize(client_id: str) -> JSONResponse:
+    """Start interactive OAuth session and return auth_url."""
+    if not _youtube_enabled():
+        raise HTTPException(status_code=400, detail="YouTube upload is disabled")
+    try:
+        session_info = start_auth_session(client_id)
         return JSONResponse(
             {
-                "ok": False,
-                "id": client_id,
-                "status": "error",
-                "detail": str(exc)[:240],
-                "needs_browser": False,
-            },
-            status_code=500,
+                "ok": True,
+                "needs_browser": True,
+                "auth_url": session_info.get("auth_url", ""),
+                "status": session_info.get("status", "pending"),
+                "detail": session_info.get("detail", "Sign in with Google in browser"),
+            }
         )
-    return JSONResponse(result)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/youtube/clients/{client_id}/authorize")
 async def youtube_client_authorize_redirect(client_id: str) -> RedirectResponse:
+    """Redirect user's browser directly to Google OAuth sign-in."""
     if not _youtube_enabled():
         raise HTTPException(status_code=400, detail="YouTube upload is disabled")
     try:
-        result = await asyncio.to_thread(authorize_client_interactive, client_id)
+        session_info = start_auth_session(client_id)
+        return RedirectResponse(session_info["auth_url"], status_code=302)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("YouTube authorize failed for %s: %s", client_id, exc)
+        logger.warning("YouTube start-auth failed for %s: %s", client_id, exc)
         return RedirectResponse(
             "/?youtube_flash=" + quote(f"{client_id}: auth failed ({exc})"),
             status_code=302,
         )
-    if result.get("ok"):
-        return RedirectResponse(
-            "/?youtube_flash=" + quote(f"{client_id}: authorized successfully"),
-            status_code=302,
-        )
-    return RedirectResponse(
-        "/?youtube_flash="
-        + quote(f"{client_id}: {result.get('detail') or 'authorization failed'}"),
-        status_code=302,
-    )
 
 
 @app.get("/videos/{run_id}/file")
@@ -594,6 +663,121 @@ async def api_generate(
 
     background_tasks.add_task(_bg)
     return JSONResponse({"status": "started", "topic": topic, "format": fmt})
+
+
+@app.get("/api/schedule")
+async def api_get_schedule() -> JSONResponse:
+    """Get current schedule status, next run times, and topic count."""
+    status = get_schedule_status()
+    status["is_running"] = "daily_batch" in _running_jobs
+    return JSONResponse(status)
+
+
+@app.patch("/api/schedule")
+async def api_patch_schedule(body: ScheduleUpdateIn) -> JSONResponse:
+    """Update daily schedule configuration and re-arm scheduler."""
+    update_schedule_config(
+        enabled=body.enabled,
+        hour=body.hour,
+        minute=body.minute,
+        daily_topics_count=body.daily_topics_count,
+        auto_upload=body.auto_upload,
+    )
+    reload_daily_job()
+    status = get_schedule_status()
+    status["is_running"] = "daily_batch" in _running_jobs
+    return JSONResponse(status)
+
+
+@app.post("/api/schedule/run-now")
+async def api_schedule_run_now(
+    background_tasks: BackgroundTasks,
+    body: ScheduleRunNowIn | None = None,
+    count: int | None = Query(default=None, ge=1, le=20),
+    auto_upload: bool | None = Query(default=None),
+) -> JSONResponse:
+    """Trigger the daily random shorts batch immediately in background using configured values."""
+    target_count = (body and body.count) or count
+    target_upload = (
+        body.auto_upload
+        if (body and body.auto_upload is not None)
+        else auto_upload
+    )
+
+    if target_count is not None or target_upload is not None:
+        update_schedule_config(
+            daily_topics_count=target_count,
+            auto_upload=target_upload,
+        )
+        reload_daily_job()
+
+    cfg = load_schedule_config()
+    effective_count = int(target_count or cfg.get("daily_topics_count") or 1)
+    effective_auto_upload = bool(
+        target_upload
+        if target_upload is not None
+        else cfg.get("auto_upload", True)
+    )
+
+    with _running_lock:
+        if "daily_batch" in _running_jobs:
+            raise HTTPException(
+                status_code=409,
+                detail="A batch generation is already running in the background. Please wait for it to complete.",
+            )
+        _running_jobs.add("daily_batch")
+
+    def _bg(run_count: int, upload_flag: bool) -> None:
+        try:
+            with _generate_semaphore:
+                from src.pipeline import run_scheduled_shorts_batch
+
+                run_scheduled_shorts_batch(
+                    count=run_count, auto_upload=upload_flag
+                )
+        except Exception:
+            logger.exception("Manual run-now batch failed")
+        finally:
+            with _running_lock:
+                _running_jobs.discard("daily_batch")
+
+    background_tasks.add_task(_bg, effective_count, effective_auto_upload)
+    return JSONResponse(
+        {
+            "status": "started",
+            "count": effective_count,
+            "auto_upload": effective_auto_upload,
+            "message": f"Started scheduled batch for {effective_count} topic(s) in background",
+        }
+    )
+
+
+@app.get("/api/topics")
+async def api_get_topics() -> JSONResponse:
+    """Get topic pool status, categories, and un-uploaded topics."""
+    return JSONResponse(get_topics_status())
+
+
+@app.post("/api/topics/pool")
+async def api_add_topic(body: TopicPoolAddIn) -> JSONResponse:
+    """Add a new topic to the configured pool."""
+    topic = body.topic.strip()
+    if not topic:
+        raise HTTPException(status_code=400, detail="Topic cannot be empty")
+    add_topic_to_pool(topic)
+    return JSONResponse(get_topics_status())
+
+
+@app.post("/api/topics/refresh")
+async def api_refresh_topics(count: int = Query(default=10, ge=1, le=30)) -> JSONResponse:
+    """Discover fresh un-uploaded educational topics from Wikipedia & LLM to replenish the pool."""
+    from src.topics.discovery import replenish_topics_pool
+
+    added = replenish_topics_pool(count=count)
+    status = get_topics_status()
+    status["added_count"] = len(added)
+    status["added_topics"] = added
+    return JSONResponse(status)
 
 
 def create_app() -> FastAPI:

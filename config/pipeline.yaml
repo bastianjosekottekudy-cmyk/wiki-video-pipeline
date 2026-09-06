@@ -54,3 +54,52 @@ youtube:
   - education
   - explainer
   - documentary
+schedule:
+  enabled: true
+  hour: 20
+  minute: 0
+  timezone: Asia/Kolkata
+  daily_topics_count: 5
+  auto_upload: true
+topics:
+  pool:
+  - James Webb Space Telescope
+  - Voyager 1
+  - Antikythera mechanism
+  - Library of Alexandria
+  - Deep sea exploration
+  - Apollo 11
+  - Marie Curie
+  - Nikola Tesla
+  - Rosetta Stone
+  - Mariana Trench
+  - Voynich manuscript
+  - Stonehenge
+  - Quantum Entanglement
+  - Black holes
+  - Turing machine
+  - Great Wall of China
+  - Bermuda Triangle
+  - Pompeii
+  - Saturn's rings
+  - Large Hadron Collider
+  - Aurora Borealis
+  - Silk Road
+  - Renaissance
+  - Industrial Revolution
+  - Superconductivity
+  - DNA structure
+  - Exoplanets
+  - Enigma machine
+  - Dead Sea Scrolls
+  - Hubble Space Telescope
+  - Tunguska event
+  - Machu Picchu
+  - Voyager Golden Record
+  - Homo floresiensis
+  - Great Silence
+  categories:
+  - Science & Astronomy
+  - Ancient History & Archaeology
+  - Unsolved Mysteries & Curiosities
+  - Inventions & Pioneers

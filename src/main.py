@@ -20,7 +20,7 @@ from src.scheduler import (
     shutdown_scheduler,
     start_scheduler,
 )
-from src.web.app import _retry_failed_uploads, app
+from src.web.app import _retry_failed_uploads, _scheduled_daily_shorts, app
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,10 @@ def main() -> None:
     host = web_cfg.get("host", "127.0.0.1")
     port = int(web_cfg.get("port", 8082))
 
-    start_scheduler(retry_uploads_callback=_retry_failed_uploads)
+    start_scheduler(
+        daily_shorts_callback=_scheduled_daily_shorts,
+        retry_uploads_callback=_retry_failed_uploads,
+    )
     failed_uploads = store.count_failed_uploads()
     if failed_uploads:
         logger.info(

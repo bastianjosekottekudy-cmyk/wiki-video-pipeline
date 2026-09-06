@@ -78,6 +78,11 @@ def attempt_youtube_upload(run_id: int, video_path: str) -> str | None:
         store.append_step_log(
             run_id, "upload", f"Uploaded https://www.youtube.com/watch?v={youtube_id}"
         )
+        store.record_uploaded_topic(
+            str(run.get("topic") or ""),
+            str(run.get("wiki_title") or article.get("title") or ""),
+            run_id=run_id,
+        )
         return youtube_id
     except YouTubeUploadError as exc:
         msg = str(exc)
@@ -159,6 +164,13 @@ def run_topic(
         store.update_run(run_id, video_path=video_path)
         store.append_step_log(run_id, "render", Path(video_path).name)
 
+        # Record topic as used/uploaded immediately so future runs never duplicate it
+        store.record_uploaded_topic(
+            topic,
+            str(article.get("title") or topic),
+            run_id=run_id,
+        )
+
         should_upload = force_upload or (not skip_upload and _youtube_enabled())
         if should_upload:
             attempt_youtube_upload(run_id, video_path)
@@ -173,6 +185,49 @@ def run_topic(
         store.finish_run(run_id, "failed", error_message=str(exc))
         store.append_step_log(run_id, "error", str(exc))
         raise
+
+
+def run_scheduled_shorts_batch(
+    count: int | None = None,
+    mock: bool = False,
+    auto_upload: bool | None = None,
+) -> list[int]:
+    """
+    Generate and upload a batch of random configured shorts.
+    Picks un-uploaded topics, runs short pipeline, and uploads to YouTube.
+    """
+    from src.config import load_schedule_config
+    from src.topics.discovery import pick_random_topics
+
+    sched = load_schedule_config()
+    if count is None:
+        count = int(sched.get("daily_topics_count") or 1)
+    if auto_upload is None:
+        auto_upload = bool(sched.get("auto_upload", True))
+
+    topics = pick_random_topics(count)
+    logger.info("Starting scheduled shorts batch for %d topic(s): %s", len(topics), topics)
+    completed_run_ids: list[int] = []
+
+    for topic in topics:
+        if store.is_topic_uploaded(topic):
+            logger.warning("Topic %r already has completed video/upload; skipping duplicate", topic)
+            continue
+        try:
+            logger.info("Scheduled batch: generating short for %r...", topic)
+            run_id = run_topic(
+                topic,
+                fmt="short",
+                skip_upload=not auto_upload,
+                force_upload=auto_upload,
+                mock=mock,
+            )
+            completed_run_ids.append(run_id)
+            logger.info("Scheduled batch: completed run %s for %r", run_id, topic)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Scheduled batch failed for topic %r: %s", topic, exc)
+
+    return completed_run_ids
 
 
 def main() -> None:

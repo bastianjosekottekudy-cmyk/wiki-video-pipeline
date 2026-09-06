@@ -58,6 +58,75 @@
     <p id="trigger-status" class="hint"></p>
   </section>
 
+  <section class="panel schedule-panel">
+    <div class="panel-head">
+      <h2>Daily Shorts Schedule & Topic Pool</h2>
+      <p class="hint">
+        Auto-generates 9:16 Shorts using source chaining (Wikipedia → Simple Wiki → DuckDuckGo → LLM) and uploads to YouTube on schedule. Strictly excludes previously uploaded topics (zero repeats).
+      </p>
+    </div>
+
+    <div class="schedule-meta-bar">
+      {% if schedule.is_running %}
+      <span class="badge badge-running">Batch in progress…</span>
+      {% endif %}
+      {% if schedule.enabled %}
+      <span class="badge badge-ready">Daily at {{ schedule.time_label }}</span>
+      {% if schedule.next_run_local %}
+      <span class="meta">Next run: <strong>{{ schedule.next_run_local }}</strong> ({{ schedule.countdown }})</span>
+      {% endif %}
+      {% else %}
+      <span class="badge badge-pending">Schedule Paused</span>
+      {% endif %}
+      <span class="badge badge-uploaded">{{ topics.pool_remaining }} / {{ topics.pool_total }} Pool Topics Available</span>
+      <span class="badge badge-success">{{ topics.uploaded_count }} Uploaded (Excluded)</span>
+    </div>
+
+    <div class="schedule-controls">
+      <label class="toggle">
+        <input type="checkbox" id="sched-enabled" {% if schedule.enabled %}checked{% endif %}>
+        <span>Schedule Active</span>
+      </label>
+      <div class="schedule-field">
+        <label for="sched-time">Time (IST)</label>
+        <input type="time" id="sched-time" class="schedule-input" value="{{ schedule.time_ist }}">
+      </div>
+      <div class="schedule-field">
+        <label for="sched-count">Shorts / Day</label>
+        <input type="number" id="sched-count" class="schedule-input" min="1" max="10" value="{{ schedule.daily_topics_count }}" style="width: 75px;">
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="sched-upload" {% if schedule.auto_upload %}checked{% endif %}>
+        <span>Auto-upload</span>
+      </label>
+      <button type="button" class="btn btn-secondary btn-small" onclick="saveSchedule()">Save Schedule</button>
+      <button type="button" class="btn btn-small" id="run-batch-btn" {% if schedule.is_running %}disabled style="opacity:0.6; cursor:not-allowed;" title="Batch generation is currently in progress"{% endif %} onclick="runDailyBatchNow()">{% if schedule.is_running %}Batch in Progress…{% else %}Run Batch Now{% endif %}</button>
+    </div>
+    <p id="sched-status" class="hint"></p>
+
+    <details class="schedule-topics-box">
+      <summary>View topic pool ({{ topics.pool_remaining }} un-uploaded) & categories</summary>
+      <div class="pool-add-row">
+        <input type="text" id="new-pool-topic" class="schedule-input" style="flex:1; min-width:220px;" placeholder="Add custom topic to pool (e.g. James Webb Space Telescope)...">
+        <button type="button" class="btn btn-small btn-secondary" onclick="addTopicToPool()">Add Topic</button>
+        <button type="button" class="btn btn-small btn-secondary" id="refill-pool-btn" onclick="refillTopicPool()">Auto-Refill Pool (+10)</button>
+      </div>
+      <div class="pool-chips">
+        {% for topic in topics.pool_remaining_topics %}
+        <span class="pool-chip" title="Available for upcoming daily shorts">{{ topic }}</span>
+        {% endfor %}
+      </div>
+      {% if topics.recent_uploaded %}
+      <p class="hint" style="margin-top:0.6rem;">Recently uploaded (strictly excluded from future runs):</p>
+      <div class="pool-chips">
+        {% for u in topics.recent_uploaded %}
+        <span class="pool-chip uploaded" title="Uploaded at {{ u.uploaded_at }}">✓ {{ u.topic_display }}</span>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </details>
+  </section>
+
   {% if youtube_enabled %}
   <section class="panel youtube-auth-panel {% if youtube_auth_warning %}youtube-auth-warning{% endif %}">
     <div class="panel-head">
@@ -78,7 +147,7 @@
           {% endif %}
         </div>
         {% if client.can_refresh %}
-        <button type="button" class="btn btn-small" onclick='refreshYoutubeClient({{ client.id|tojson }})'>Refresh</button>
+        <button type="button" class="btn btn-small" onclick='refreshYoutubeClient({{ client.id|tojson }})'>{{ client.action_label or ('Refresh' if client.status == 'ok' else 'Authorize') }}</button>
         {% endif %}
       </li>
       {% else %}
@@ -269,42 +338,253 @@
       }
     }
 
+    let _authPollTimer = null;
+
     async function refreshYoutubeClient(clientId) {
       const status = document.getElementById('youtube-auth-status');
-      status.textContent = 'Refreshing ' + clientId + '…';
+      if (_authPollTimer) {
+        clearInterval(_authPollTimer);
+        _authPollTimer = null;
+      }
+      status.innerHTML = 'Connecting to ' + clientId + '…';
+
       try {
         const res = await fetch('/api/youtube/clients/' + encodeURIComponent(clientId) + '/refresh', {
           method: 'POST',
         });
         const data = await res.json();
         if (!res.ok) {
-          status.textContent = data.detail || 'Refresh failed';
+          status.textContent = data.detail || 'Request failed';
           return;
         }
+
+        // If silent refresh succeeded (token was already valid or refreshed in place):
         if (data.ok) {
-          status.textContent = clientId + ': ' + (data.detail || 'ok') + ' — reloading…';
-          setTimeout(() => location.reload(), 600);
+          status.textContent = clientId + ': ' + (data.detail || 'Token refreshed') + ' — reloading…';
+          setTimeout(() => location.reload(), 800);
           return;
         }
-        if (data.needs_browser) {
-          status.textContent = clientId + ': complete Google sign-in in the browser window that opens…';
-          const authRes = await fetch(
-            '/api/youtube/clients/' + encodeURIComponent(clientId) + '/authorize',
-            { method: 'POST' }
-          );
-          const authData = await authRes.json().catch(() => ({}));
-          if (!authRes.ok || !authData.ok) {
-            status.textContent = authData.detail || 'Authorization failed';
-            return;
-          }
-          status.textContent = clientId + ': authorized — reloading…';
-          setTimeout(() => location.reload(), 600);
+
+        // If interactive browser sign-in is required:
+        let authUrl = data.auth_url;
+        if (!authUrl && data.needs_browser) {
+          const startRes = await fetch('/api/youtube/clients/' + encodeURIComponent(clientId) + '/start-auth', {
+            method: 'POST',
+          });
+          const startData = await startRes.json();
+          authUrl = startData.auth_url;
+        }
+
+        if (authUrl) {
+          // Open the sign-in URL in a new tab
+          window.open(authUrl, '_blank');
+
+          status.innerHTML =
+            '<strong>Google Sign-in Required:</strong> Please complete sign-in in the opened tab.<br>' +
+            '<a href="' + authUrl + '" target="_blank" class="btn btn-small" style="margin: 8px 0; display: inline-block;">' +
+            '👉 Click here if window did not open</a><br>' +
+            '<span style="opacity:0.8;">Waiting for authorization to complete…</span>';
+
+          // Poll for completion
+          const startTime = Date.now();
+          _authPollTimer = setInterval(async () => {
+            if (Date.now() - startTime > 180000) {
+              clearInterval(_authPollTimer);
+              _authPollTimer = null;
+              status.textContent = clientId + ': Authorization timed out. Please try again.';
+              return;
+            }
+
+            try {
+              const pollRes = await fetch('/api/youtube/clients/' + encodeURIComponent(clientId) + '/auth-status');
+              if (!pollRes.ok) return;
+              const pollData = await pollRes.json();
+              if (pollData.status === 'completed' || pollData.ok) {
+                clearInterval(_authPollTimer);
+                _authPollTimer = null;
+                status.innerHTML = '<strong style="color:var(--color-success, #22c55e);">✓ ' + clientId + ': Authorized successfully!</strong> Reloading…';
+                setTimeout(() => location.reload(), 800);
+              } else if (pollData.status === 'error') {
+                clearInterval(_authPollTimer);
+                _authPollTimer = null;
+                status.textContent = clientId + ': ' + (pollData.detail || 'Authorization failed');
+              }
+            } catch (err) {
+              // ignore transient fetch error while polling
+            }
+          }, 1500);
           return;
         }
-        status.textContent = data.detail || 'Refresh failed';
+
+        status.textContent = data.detail || 'Action failed';
       } catch (e) {
         status.textContent = 'Error: ' + e.message;
       }
+    }
+
+    async function saveSchedule() {
+      const status = document.getElementById('sched-status');
+      const enabled = document.getElementById('sched-enabled').checked;
+      const timeVal = document.getElementById('sched-time').value || '20:00';
+      const [hStr, mStr] = timeVal.split(':');
+      const hour = parseInt(hStr, 10);
+      const minute = parseInt(mStr, 10);
+      const count = parseInt(document.getElementById('sched-count').value, 10) || 1;
+      const autoUpload = document.getElementById('sched-upload').checked;
+
+      status.textContent = 'Updating daily schedule…';
+      try {
+        const res = await fetch('/api/schedule', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            enabled,
+            hour,
+            minute,
+            daily_topics_count: count,
+            auto_upload: autoUpload,
+          }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+          status.textContent = `Schedule updated! ${data.time_label} (${data.daily_topics_count} topic(s)/day). Reloading…`;
+          setTimeout(() => location.reload(), 800);
+        } else {
+          status.textContent = data.detail || 'Failed to update schedule';
+        }
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    async function runDailyBatchNow() {
+      const status = document.getElementById('sched-status');
+      const btn = document.getElementById('run-batch-btn');
+
+      const enabled = document.getElementById('sched-enabled').checked;
+      const timeVal = document.getElementById('sched-time').value || '20:00';
+      const [hStr, mStr] = timeVal.split(':');
+      const hour = parseInt(hStr, 10);
+      const minute = parseInt(mStr, 10);
+      const count = parseInt(document.getElementById('sched-count').value, 10) || 1;
+      const autoUpload = document.getElementById('sched-upload').checked;
+
+      const uploadText = autoUpload ? ' with YouTube auto-upload' : ' (local render only)';
+      if (!confirm(`Run batch now for ${count} configured topic(s)${uploadText}?`)) {
+        return;
+      }
+
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Starting…';
+      }
+      status.textContent = `Applying configured settings and starting batch for ${count} topic(s)…`;
+
+      try {
+        // Automatically save schedule parameters so pipeline.yaml matches user inputs
+        await fetch('/api/schedule', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            enabled,
+            hour,
+            minute,
+            daily_topics_count: count,
+            auto_upload: autoUpload,
+          }),
+        });
+
+        // Trigger batch with explicit count and auto_upload from configuration
+        const res = await fetch('/api/schedule/run-now', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            count: count,
+            auto_upload: autoUpload,
+          }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+          status.textContent = `Batch started for ${data.count || count} topic(s)! Reloading to track progress…`;
+          setTimeout(() => location.reload(), 1200);
+        } else {
+          if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Run Batch Now';
+          }
+          status.textContent = data.detail || 'Failed to start batch';
+        }
+      } catch (e) {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = 'Run Batch Now';
+        }
+        status.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    async function addTopicToPool() {
+      const input = document.getElementById('new-pool-topic');
+      const topic = (input.value || '').trim();
+      const status = document.getElementById('sched-status');
+      if (!topic) return;
+
+      status.textContent = `Adding “${topic}” to topic pool…`;
+      try {
+        const res = await fetch('/api/topics/pool', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ topic }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+          input.value = '';
+          status.textContent = `Added “${topic}”! Topic pool now has ${data.pool_remaining} available. Reloading…`;
+          setTimeout(() => location.reload(), 800);
+        } else {
+          status.textContent = data.detail || 'Failed to add topic';
+        }
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    async function refillTopicPool() {
+      const status = document.getElementById('sched-status');
+      const btn = document.getElementById('refill-pool-btn');
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Refilling…';
+      }
+      status.textContent = 'Discovering 10 fresh, un-uploaded topics from Wikipedia & LLM…';
+      try {
+        const res = await fetch('/api/topics/refresh?count=10', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          const added = data.added_count || 0;
+          status.textContent = `Added ${added} new topic(s) to the pool! Pool now has ${data.pool_remaining} available. Reloading…`;
+          setTimeout(() => location.reload(), 1000);
+        } else {
+          if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Auto-Refill Pool (+10)';
+          }
+          status.textContent = data.detail || 'Failed to refill topic pool';
+        }
+      } catch (e) {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = 'Auto-Refill Pool (+10)';
+        }
+        status.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    const poolInput = document.getElementById('new-pool-topic');
+    if (poolInput) {
+      poolInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') addTopicToPool();
+      });
     }
   </script>
 </body>

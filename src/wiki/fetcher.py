@@ -372,7 +372,9 @@ def resolve_article(
     *,
     mock: bool = False,
 ) -> dict[str, Any]:
-    article = _mock_article(topic, fmt) if mock else fetch_article(topic, fmt)
+    from src.sources import get_source_chain
+
+    article = get_source_chain().resolve(topic, fmt=fmt, mock=mock)
     path = output_dir / "article.json"
     path.write_text(json.dumps(article, indent=2), encoding="utf-8")
     return article

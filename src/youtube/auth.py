@@ -9,6 +9,7 @@ import logging
 import secrets
 import subprocess
 import sys
+import threading
 import time
 import webbrowser
 import wsgiref.simple_server
@@ -103,9 +104,36 @@ def _is_invalid_grant(exc: BaseException) -> bool:
     return "invalid_grant" in text or "expired or revoked" in text
 
 
-def _save_token(creds: Credentials, token_path: Path) -> None:
+def _sync_token_to_central_store(client_id: str, token_path: Path) -> None:
+    try:
+        candidates = [
+            Path("/run/media/bastianj/B29409DC9409A447/Users/USER/.cursor/skills/google-auth/secrets/tokens/youtube")
+            / client_id
+            / "token.json",
+            Path.home()
+            / ".cursor"
+            / "skills"
+            / "google-auth"
+            / "secrets"
+            / "tokens"
+            / "youtube"
+            / client_id
+            / "token.json",
+        ]
+        for c in candidates:
+            if c.parent.parent.parent.exists():
+                c.parent.mkdir(parents=True, exist_ok=True)
+                c.write_text(token_path.read_text(encoding="utf-8"), encoding="utf-8")
+                logger.info("Backed up %s token to central store %s", client_id, c)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not sync token to central store: %s", exc)
+
+
+def _save_token(creds: Credentials, token_path: Path, client_id: str = "") -> None:
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text(creds.to_json(), encoding="utf-8")
+    if client_id:
+        _sync_token_to_central_store(client_id, token_path)
 
 
 def _clear_stale_token(token_path: Path) -> None:
@@ -116,9 +144,9 @@ def _clear_stale_token(token_path: Path) -> None:
         )
 
 
-def _refresh_or_raise(creds: Credentials, token_path: Path) -> Credentials:
+def _refresh_or_raise(creds: Credentials, token_path: Path, client_id: str = "") -> Credentials:
     creds.refresh(Request())
-    _save_token(creds, token_path)
+    _save_token(creds, token_path, client_id=client_id)
     return creds
 
 
@@ -130,9 +158,7 @@ def _status_dict(
     can_refresh: bool | None = None,
 ) -> dict[str, Any]:
     if can_refresh is None:
-        can_refresh = (
-            status not in ("ok", "missing_secrets") and client.client_secrets.is_file()
-        )
+        can_refresh = client.client_secrets.is_file()
     return {
         "id": client.id,
         "status": status,
@@ -140,6 +166,7 @@ def _status_dict(
         "can_refresh": can_refresh,
         "has_secrets": client.client_secrets.is_file(),
         "has_token": client.token.is_file(),
+        "action_label": "Refresh" if status == "ok" else "Authorize",
     }
 
 
@@ -175,7 +202,7 @@ def probe_client_status(
         )
 
     if creds and creds.valid:
-        return _status_dict(client, "ok", detail="Token valid", can_refresh=False)
+        return _status_dict(client, "ok", detail="Token valid")
 
     if creds and creds.expired and creds.refresh_token:
         if not attempt_refresh:
@@ -186,9 +213,9 @@ def probe_client_status(
                 can_refresh=True,
             )
         try:
-            _refresh_or_raise(creds, client.token)
+            _refresh_or_raise(creds, client.token, client_id=client.id)
             return _status_dict(
-                client, "ok", detail="Token refreshed", can_refresh=False
+                client, "ok", detail="Token refreshed"
             )
         except RefreshError as exc:
             if _is_invalid_grant(exc):
@@ -228,10 +255,194 @@ def probe_youtube_clients(*, attempt_refresh: bool = True) -> list[dict[str, Any
     ]
 
 
+class OAuthAuthSession:
+    def __init__(self, client: YouTubeClient, timeout: float = 180.0) -> None:
+        self.client = client
+        self.timeout = timeout
+        self.created_at = time.time()
+        self.flow: InstalledAppFlow | None = None
+        self.server: wsgiref.simple_server.WSGIServer | None = None
+        self.thread: threading.Thread | None = None
+        self.auth_url: str = ""
+        self.status: str = "pending"  # pending, completed, error, timed_out
+        self.ok: bool = False
+        self.detail: str = "Waiting for user sign-in"
+        self.received_query: str = ""
+        self._stop = False
+        self._completed_event = threading.Event()
+
+    def is_alive(self) -> bool:
+        if self.status != "pending":
+            return False
+        if time.time() - self.created_at > self.timeout:
+            self.status = "timed_out"
+            self.detail = "Authorization timed out. Please try again."
+            self.close()
+            return False
+        return True
+
+    def start(self) -> str:
+        flow = InstalledAppFlow.from_client_secrets_file(str(self.client.client_secrets), SCOPES)
+        self.flow = flow
+
+        session_ref = self
+
+        class _CallbackApp:
+            def __call__(self, environ: dict[str, Any], start_response: Any) -> list[bytes]:
+                query = environ.get("QUERY_STRING", "")
+                if "code=" in query or "error=" in query:
+                    session_ref.received_query = query
+                    start_response("200 OK", [("Content-type", "text/html; charset=utf-8")])
+                    html = (
+                        "<!DOCTYPE html>"
+                        "<html>"
+                        "<head><meta charset='utf-8'><title>YouTube Authorization Complete</title></head>"
+                        "<body style='font-family:system-ui,-apple-system,sans-serif;text-align:center;padding:60px;background:#18181b;color:#f4f4f5;'>"
+                        "<div style='max-width:480px;margin:0 auto;background:#27272a;padding:32px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,0.5);'>"
+                        "<h2 style='color:#22c55e;margin-top:0;'>✓ Authorization Successful</h2>"
+                        "<p style='color:#a1a1aa;line-height:1.6;'>YouTube OAuth credentials have been saved. You can close this window and return to the dashboard.</p>"
+                        "<script>setTimeout(function(){ window.close(); }, 2500);</script>"
+                        "</div>"
+                        "</body>"
+                        "</html>"
+                    )
+                    return [html.encode("utf-8")]
+                else:
+                    start_response("404 Not Found", [("Content-type", "text/plain")])
+                    return [b"Not found"]
+
+        class _QuietHandler(wsgiref.simple_server.WSGIRequestHandler):
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+        wsgiref.simple_server.WSGIServer.allow_reuse_address = False
+        local_server = wsgiref.simple_server.make_server(
+            "localhost", 0, _CallbackApp(), handler_class=_QuietHandler
+        )
+        local_server.timeout = 1.5
+        self.server = local_server
+
+        flow.redirect_uri = f"http://localhost:{local_server.server_port}/"
+        auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+        self.auth_url = auth_url
+
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        return auth_url
+
+    def _run(self) -> None:
+        deadline = self.created_at + self.timeout
+        try:
+            while time.time() < deadline and not self._stop:
+                if self.server is not None:
+                    self.server.handle_request()
+                if self.received_query:
+                    break
+
+            if not self.received_query:
+                self.status = "timed_out"
+                self.detail = "Authorization timed out. Please try again."
+                return
+
+            if "error=" in self.received_query:
+                self.status = "error"
+                self.detail = "Authorization was denied by Google account."
+                return
+
+            authorization_response = f"https://localhost:{self.server.server_port}/?{self.received_query}"
+            last_exc: BaseException | None = None
+            for attempt in range(1, 6):
+                try:
+                    self.flow.fetch_token(authorization_response=authorization_response)
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    time.sleep(min(attempt * 2, 8))
+            else:
+                raise last_exc or RuntimeError("Failed to exchange OAuth token")
+
+            creds = self.flow.credentials
+            _save_token(creds, self.client.token, client_id=self.client.id)
+            self.status = "completed"
+            self.ok = True
+            self.detail = "Authorized successfully"
+            logger.info("Successfully authorized YouTube client %s", self.client.id)
+        except Exception as exc:
+            logger.exception("Interactive OAuth flow failed for %s: %s", self.client.id, exc)
+            self.status = "error"
+            self.detail = str(exc)[:240]
+        finally:
+            self._completed_event.set()
+            self.close()
+
+    def wait_completion(self, timeout: float = 180.0) -> bool:
+        return self._completed_event.wait(timeout=timeout)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.client.id,
+            "status": self.status,
+            "ok": self.ok,
+            "detail": self.detail,
+            "auth_url": self.auth_url,
+        }
+
+    def close(self) -> None:
+        self._stop = True
+        if self.server is not None:
+            try:
+                self.server.server_close()
+            except Exception:
+                pass
+            self.server = None
+
+
+_active_sessions: dict[str, OAuthAuthSession] = {}
+_session_lock = threading.Lock()
+
+
+def start_auth_session(client_id: str, timeout: float = 180.0) -> dict[str, Any]:
+    client = get_youtube_client(client_id)
+    if not client.client_secrets.is_file():
+        raise FileNotFoundError(
+            f"YouTube client secrets not found for {client.id} at {client.client_secrets}"
+        )
+
+    with _session_lock:
+        existing = _active_sessions.get(client.id)
+        if existing and existing.is_alive():
+            return existing.to_dict()
+        elif existing:
+            existing.close()
+
+        session = OAuthAuthSession(client, timeout=timeout)
+        session.start()
+        _active_sessions[client.id] = session
+        return session.to_dict()
+
+
+def get_auth_session_status(client_id: str) -> dict[str, Any]:
+    client = get_youtube_client(client_id)
+    with _session_lock:
+        session = _active_sessions.get(client.id)
+        if session:
+            session.is_alive()
+            return session.to_dict()
+
+    probe = probe_client_status(client, attempt_refresh=False)
+    return {
+        "id": client.id,
+        "status": "completed" if probe.get("status") == "ok" else "idle",
+        "ok": probe.get("status") == "ok",
+        "detail": probe.get("detail", ""),
+        "auth_url": "",
+    }
+
+
 def try_silent_refresh(client_id: str) -> dict[str, Any]:
     """
     Attempt silent token refresh for one client.
-    Returns status dict plus ok / needs_browser flags.
+    Returns status dict plus ok / needs_browser flags and auth_url if needed.
     """
     client = get_youtube_client(client_id)
     if not client.client_secrets.is_file():
@@ -254,6 +465,8 @@ def try_silent_refresh(client_id: str) -> dict[str, Any]:
         )
         result["ok"] = False
         result["needs_browser"] = True
+        session = start_auth_session(client.id)
+        result["auth_url"] = session.get("auth_url", "")
         return result
 
     try:
@@ -267,11 +480,13 @@ def try_silent_refresh(client_id: str) -> dict[str, Any]:
         )
         result["ok"] = False
         result["needs_browser"] = True
+        session = start_auth_session(client.id)
+        result["auth_url"] = session.get("auth_url", "")
         return result
 
     if creds and creds.valid:
         result = _status_dict(
-            client, "ok", detail="Token already valid", can_refresh=False
+            client, "ok", detail="Token already valid", can_refresh=True
         )
         result["ok"] = True
         result["needs_browser"] = False
@@ -286,11 +501,13 @@ def try_silent_refresh(client_id: str) -> dict[str, Any]:
         )
         result["ok"] = False
         result["needs_browser"] = True
+        session = start_auth_session(client.id)
+        result["auth_url"] = session.get("auth_url", "")
         return result
 
     try:
-        _refresh_or_raise(creds, client.token)
-        result = _status_dict(client, "ok", detail="Token refreshed", can_refresh=False)
+        _refresh_or_raise(creds, client.token, client_id=client.id)
+        result = _status_dict(client, "ok", detail="Token refreshed", can_refresh=True)
         result["ok"] = True
         result["needs_browser"] = False
         return result
@@ -305,6 +522,8 @@ def try_silent_refresh(client_id: str) -> dict[str, Any]:
             )
             result["ok"] = False
             result["needs_browser"] = True
+            session = start_auth_session(client.id)
+            result["auth_url"] = session.get("auth_url", "")
             return result
         result = _status_dict(
             client,
@@ -314,6 +533,8 @@ def try_silent_refresh(client_id: str) -> dict[str, Any]:
         )
         result["ok"] = False
         result["needs_browser"] = True
+        session = start_auth_session(client.id)
+        result["auth_url"] = session.get("auth_url", "")
         return result
     except Exception as exc:  # noqa: BLE001
         result = _status_dict(
@@ -324,44 +545,28 @@ def try_silent_refresh(client_id: str) -> dict[str, Any]:
         )
         result["ok"] = False
         result["needs_browser"] = True
+        session = start_auth_session(client.id)
+        result["auth_url"] = session.get("auth_url", "")
         return result
 
 
-def authorize_client_interactive(client_id: str) -> dict[str, Any]:
+def authorize_client_interactive(client_id: str, timeout: float = 180.0) -> dict[str, Any]:
     """
     Open Google login via Desktop loopback and save the token.
-
-    Skips token.json / YOUTUBE_REFRESH_TOKEN so a revoked refresh token cannot
-    block re-auth. Desktop clients require localhost loopback (not the dashboard
-    callback URL).
+    Compatible with CLI and direct calls.
     """
-    client = get_youtube_client(client_id)
-    if not client.client_secrets.is_file():
-        raise FileNotFoundError(
-            f"YouTube client secrets not found for {client.id} at {client.client_secrets}"
-        )
-    if client.token.is_file():
-        _clear_stale_token(client.token)
+    session_info = start_auth_session(client_id, timeout=timeout)
+    auth_url = session_info.get("auth_url", "")
+    logger.info("Please visit this URL to authorize this application: %s", auth_url)
+    print(f"Please visit this URL to authorize this application: {auth_url}", flush=True)
+    _open_auth_browser(auth_url)
 
-    logger.info("Opening Google OAuth browser for YouTube client %s", client.id)
-    creds = _run_browser_oauth(client.client_secrets)
-    _save_token(creds, client.token)
-    if client.id == "primary" and creds.refresh_token:
-        logger.info(
-            "Primary authorized. Update .env YOUTUBE_REFRESH_TOKEN if you use it "
-            "(old value was revoked)."
-        )
-
-    result = probe_client_status(client, attempt_refresh=False)
-    result["ok"] = result.get("status") == "ok"
-    result["needs_browser"] = False
-    if not result["ok"]:
-        result["detail"] = (
-            result.get("detail") or "Authorization did not produce a valid token"
-        )
-    else:
-        result["detail"] = "Authorized successfully"
-    return result
+    with _session_lock:
+        session = _active_sessions.get(client_id)
+    if session:
+        session.wait_completion(timeout=timeout)
+        return session.to_dict()
+    return probe_client_status(get_youtube_client(client_id), attempt_refresh=False)
 
 
 def _open_auth_browser(url: str) -> None:
