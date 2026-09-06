@@ -147,7 +147,7 @@ def db(timeout: float = 60.0, retries: int = 5) -> Iterator[sqlite3.Connection]:
                 conn.close()
 
 
-def create_run(topic: str, fmt: str, run_date: str) -> int:
+def create_run(topic: str, fmt: str, run_date: str, *, status: str = "running") -> int:
     now = datetime.now(timezone.utc).isoformat()
     with db() as conn:
         cur = conn.execute(
@@ -155,9 +155,9 @@ def create_run(topic: str, fmt: str, run_date: str) -> int:
             INSERT INTO runs (
                 format, topic, run_date, status, started_at, steps_log, upload_status
             )
-            VALUES (?, ?, ?, 'running', ?, '[]', 'none')
+            VALUES (?, ?, ?, ?, ?, '[]', 'none')
             """,
-            (fmt.lower(), topic, run_date, now),
+            (fmt.lower(), topic, run_date, status, now),
         )
         return int(cur.lastrowid)
 
@@ -199,6 +199,59 @@ def finish_run(run_id: int, status: str, error_message: str | None = None) -> No
     )
 
 
+def stop_run(run_id: int, reason: str = "Stopped by user") -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    update_run(
+        run_id,
+        status="stopped",
+        finished_at=now,
+        error_message=reason,
+    )
+    append_step_log(run_id, "stopped", reason)
+
+
+def reset_run_for_retry(run_id: int) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    update_run(
+        run_id,
+        status="running",
+        started_at=now,
+        finished_at=None,
+        error_message=None,
+        upload_status="none",
+        upload_error=None,
+    )
+    append_step_log(run_id, "retry", "Generation retry initiated")
+
+
+def queue_run_for_retry(run_id: int) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    update_run(
+        run_id,
+        status="queued",
+        started_at=now,
+        finished_at=None,
+        error_message=None,
+        upload_status="none",
+        upload_error=None,
+    )
+    append_step_log(run_id, "queued", "Generation retry queued")
+
+
+def list_failed_runs(limit: int = 500) -> list[dict[str, Any]]:
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM runs
+            WHERE status IN ('failed', 'stopped')
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def set_upload_status(
     run_id: int,
     upload_status: str,
@@ -221,7 +274,7 @@ def fail_orphaned_runs(
     now = datetime.now(timezone.utc).isoformat()
     failed_ids: list[int] = []
     with db() as conn:
-        rows = conn.execute("SELECT id FROM runs WHERE status = 'running'").fetchall()
+        rows = conn.execute("SELECT id FROM runs WHERE status IN ('running', 'queued')").fetchall()
         ids = [int(row["id"]) for row in rows]
         if ids:
             conn.execute(
@@ -230,7 +283,7 @@ def fail_orphaned_runs(
                 SET status = 'failed',
                     finished_at = ?,
                     error_message = ?
-                WHERE status = 'running'
+                WHERE status IN ('running', 'queued')
                 """,
                 (now, error_message),
             )
@@ -365,6 +418,9 @@ def count_runs_today() -> dict[str, int]:
         running = conn.execute(
             "SELECT COUNT(*) FROM runs WHERE status = 'running'", ()
         ).fetchone()[0]
+        queued = conn.execute(
+            "SELECT COUNT(*) FROM runs WHERE status = 'queued'", ()
+        ).fetchone()[0]
         uploading = conn.execute(
             "SELECT COUNT(*) FROM runs WHERE upload_status = 'uploading'", ()
         ).fetchone()[0]
@@ -373,6 +429,7 @@ def count_runs_today() -> dict[str, int]:
         "today_success": success,
         "today_failed": failed,
         "running": running,
+        "queued": queued,
         "uploading": uploading,
     }
 
@@ -430,11 +487,11 @@ def get_uploaded_topics() -> set[str]:
                 if norm_w:
                     seen.add(norm_w)
 
-        # 2. From runs table (any run that succeeded, is running, or has upload history)
+        # 2. From runs table (any run that succeeded, is running, is queued, or has upload history)
         runs = conn.execute(
             """
             SELECT topic, wiki_title FROM runs
-            WHERE (status IN ('success', 'running')
+            WHERE (status IN ('success', 'running', 'queued')
                    OR upload_status IN ('uploaded', 'uploading', 'failed')
                    OR (youtube_video_id IS NOT NULL AND youtube_video_id != ''))
               AND topic IS NOT NULL AND TRIM(topic) != ''

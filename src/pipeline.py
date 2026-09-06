@@ -19,6 +19,7 @@ from src.audio.tts import generate_narration
 from src.config import format_profile, local_run_date, run_output_dir
 from src.db import store
 from src.images.fetcher import fetch_article_images
+from src.job_control import JobStoppedError, check_stop, register_run, unregister_run
 from src.script.generator import generate_script
 from src.video.renderer import render_video
 from src.wiki.fetcher import resolve_article
@@ -125,12 +126,16 @@ def run_topic(
 
     run_date = local_run_date()
     run_id = existing_run_id or store.create_run(topic, fmt, run_date)
+    store.update_run(run_id, status="running")
     out_dir = run_output_dir(run_date, fmt, run_id)
+    register_run(run_id, topic)
     store.append_step_log(run_id, "start", f"{fmt} · {topic}")
 
     try:
+        check_stop(run_id, topic)
         store.append_step_log(run_id, "wiki", "Resolving Wikipedia article")
         article = resolve_article(topic, fmt, out_dir, mock=mock)
+        check_stop(run_id, topic)
         store.update_run(
             run_id,
             wiki_title=article.get("title") or topic,
@@ -138,19 +143,25 @@ def run_topic(
         )
         store.append_step_log(run_id, "wiki", str(article.get("title") or topic))
 
+        check_stop(run_id, topic)
         store.append_step_log(run_id, "images", "Fetching free images")
         credits = fetch_article_images(article, out_dir, mock=mock)
+        check_stop(run_id, topic)
         payload = {"article": article, "credits": credits}
         store.update_run(run_id, article_json=json.dumps(payload))
 
+        check_stop(run_id, topic)
         store.append_step_log(run_id, "script", "Writing narration")
         script = generate_script(article, fmt, out_dir)
+        check_stop(run_id, topic)
         script_path = out_dir / "script.txt"
         store.update_run(run_id, script_path=str(script_path))
 
+        check_stop(run_id, topic)
         store.append_step_log(run_id, "tts", "Generating speech")
         audio_path = generate_narration(script_path, out_dir)
 
+        check_stop(run_id, topic)
         store.append_step_log(run_id, "render", f"Rendering {fmt}")
         video_path = render_video(
             str(article.get("title") or topic),
@@ -161,6 +172,7 @@ def run_topic(
             script=script,
             image_paths=[c["path"] for c in credits if c.get("path")],
         )
+        check_stop(run_id, topic)
         store.update_run(run_id, video_path=video_path)
         store.append_step_log(run_id, "render", Path(video_path).name)
 
@@ -173,6 +185,7 @@ def run_topic(
 
         should_upload = force_upload or (not skip_upload and _youtube_enabled())
         if should_upload:
+            check_stop(run_id, topic)
             attempt_youtube_upload(run_id, video_path)
         else:
             store.append_step_log(run_id, "upload", "Skipped (local only)")
@@ -180,11 +193,51 @@ def run_topic(
         store.finish_run(run_id, "success")
         logger.info("Run %s complete: %s", run_id, video_path)
         return run_id
+    except JobStoppedError as exc:
+        logger.warning("Run %s stopped: %s", run_id, exc)
+        store.stop_run(run_id, reason="Stopped by user")
+        raise
     except Exception as exc:
         logger.exception("Run %s failed", run_id)
         store.finish_run(run_id, "failed", error_message=str(exc))
         store.append_step_log(run_id, "error", str(exc))
         raise
+    finally:
+        unregister_run(run_id)
+
+
+def retry_single_topic(
+    run_id: int,
+    *,
+    mock: bool = False,
+    skip_upload: bool = True,
+    force_upload: bool = False,
+) -> int:
+    """
+    Retry a failed or stopped run, reusing its existing run record.
+    """
+    from src.job_control import clear_stop
+
+    run = store.get_run(run_id)
+    if not run:
+        raise ValueError(f"Run {run_id} not found")
+    if run.get("status") == "running":
+        raise ValueError(f"Run {run_id} is already running")
+
+    topic = str(run.get("topic") or "").strip()
+    fmt = str(run.get("format") or "short").strip()
+
+    clear_stop(run_id, topic)
+    store.reset_run_for_retry(run_id)
+
+    return run_topic(
+        topic,
+        fmt=fmt,
+        skip_upload=skip_upload,
+        force_upload=force_upload,
+        mock=mock,
+        existing_run_id=run_id,
+    )
 
 
 def run_scheduled_shorts_batch(
@@ -209,23 +262,55 @@ def run_scheduled_shorts_batch(
     logger.info("Starting scheduled shorts batch for %d topic(s): %s", len(topics), topics)
     completed_run_ids: list[int] = []
 
+    run_date = local_run_date()
+    queued_items: list[tuple[int, str]] = []
     for topic in topics:
         if store.is_topic_uploaded(topic):
             logger.warning("Topic %r already has completed video/upload; skipping duplicate", topic)
             continue
+        rid = store.create_run(topic, "short", run_date, status="queued")
+        store.append_step_log(rid, "queued", f"Batch run queued for {topic}")
+        queued_items.append((rid, topic))
+        logger.info("Pre-created queued run %s for topic %r", rid, topic)
+
+    for rid, topic in queued_items:
         try:
-            logger.info("Scheduled batch: generating short for %r...", topic)
+            check_stop(rid, topic)
+        except JobStoppedError:
+            logger.info("Scheduled shorts batch cancelled by stop request")
+            store.stop_run(rid, reason="Stopped by user while queued")
+            break
+
+        curr = store.get_run(rid)
+        if curr and curr.get("status") == "stopped":
+            logger.info("Run %s was stopped while queued; skipping", rid)
+            continue
+
+        try:
+            logger.info("Scheduled batch: starting short for %r (run #%s)...", topic, rid)
+            store.update_run(rid, status="running")
             run_id = run_topic(
                 topic,
                 fmt="short",
                 skip_upload=not auto_upload,
                 force_upload=auto_upload,
                 mock=mock,
+                existing_run_id=rid,
             )
             completed_run_ids.append(run_id)
             logger.info("Scheduled batch: completed run %s for %r", run_id, topic)
+        except JobStoppedError:
+            logger.warning("Scheduled batch stopped during topic %r (run %s)", topic, rid)
+            break
         except Exception as exc:  # noqa: BLE001
             logger.exception("Scheduled batch failed for topic %r: %s", topic, exc)
+
+    # Cancel any remaining runs in queued_items that were never reached if stopped
+    for rem_id, rem_topic in queued_items:
+        if rem_id not in completed_run_ids:
+            run_data = store.get_run(rem_id)
+            if run_data and run_data.get("status") == "queued":
+                store.stop_run(rem_id, reason="Stopped before processing started")
 
     return completed_run_ids
 

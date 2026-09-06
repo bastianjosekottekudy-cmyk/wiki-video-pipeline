@@ -357,6 +357,9 @@ def render_video(
     script: dict[str, Any] | None = None,
     image_paths: list[str] | None = None,
 ) -> str:
+    from src.job_control import check_stop
+
+    check_stop()
     config = load_pipeline_config()
     video_cfg = config.get("video", {})
     profile = format_profile(fmt)

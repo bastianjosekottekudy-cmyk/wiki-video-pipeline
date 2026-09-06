@@ -252,13 +252,17 @@ def _enrich_run(run: dict[str, Any]) -> dict[str, Any]:
     run["youtube_url"] = (
         f"https://www.youtube.com/watch?v={yt_id}" if run["is_uploaded"] else ""
     )
-    run["can_upload"] = bool(run["has_video"] and run.get("status") != "running")
+    run["can_upload"] = bool(run["has_video"] and run.get("status") not in ("running", "queued"))
+    run["can_stop"] = bool(run.get("status") in ("running", "queued"))
+    run["can_retry"] = bool(run.get("status") not in ("running", "queued"))
     run["upload_label"] = (
         "Re-upload" if upload_status in ("uploaded", "failed") else "Upload"
     )
     run["format_label"] = "Short" if fmt == "short" else "Video"
 
-    if upload_status == "uploading":
+    if run.get("status") == "queued":
+        run["display_status"] = "queued"
+    elif upload_status == "uploading":
         run["display_status"] = "uploading"
     elif run["is_uploaded"]:
         run["display_status"] = "uploaded"
@@ -362,6 +366,7 @@ async def index(
     stats = store.count_runs_today()
     available_dates = store.list_run_dates()
     has_running = any(r["status"] == "running" for r in runs) or stats.get("running", 0) > 0
+    has_queued = any(r.get("status") == "queued" for r in runs) or stats.get("queued", 0) > 0
     has_uploading = (
         any(r.get("upload_status") == "uploading" for r in runs)
         or stats.get("uploading", 0) > 0
@@ -384,6 +389,7 @@ async def index(
             "filter_format": (fmt or "").lower(),
             "filter_date": date or "",
             "has_running": has_running,
+            "has_queued": has_queued,
             "has_uploading": has_uploading,
             "youtube_enabled": youtube_on,
             "youtube_clients": youtube_clients,
@@ -534,8 +540,8 @@ def _run_is_uploaded(run: dict[str, Any]) -> bool:
 
 def _delete_run_if_idle(run: dict[str, Any]) -> dict[str, Any]:
     run_id = int(run["id"])
-    if run.get("status") == "running":
-        return {"run_id": run_id, "ok": False, "reason": "running"}
+    if run.get("status") in ("running", "queued"):
+        return {"run_id": run_id, "ok": False, "reason": run.get("status")}
     if (run.get("upload_status") or "") == "uploading" or run_id in _uploading_runs:
         return {"run_id": run_id, "ok": False, "reason": "uploading"}
     deleted_paths = _delete_run_artifacts(run)
@@ -552,8 +558,11 @@ async def api_delete_run(run_id: int) -> JSONResponse:
     result = _delete_run_if_idle(run)
     if not result["ok"]:
         reason = result.get("reason")
-        if reason == "running":
-            raise HTTPException(status_code=409, detail="Cannot delete a running job")
+        if reason in ("running", "queued"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot delete a {reason} job. Stop or cancel it first.",
+            )
         raise HTTPException(status_code=409, detail="Cannot delete while uploading")
     return JSONResponse(
         {"ok": True, "run_id": run_id, "deleted_paths": result.get("deleted_paths", [])}
@@ -563,11 +572,13 @@ async def api_delete_run(run_id: int) -> JSONResponse:
 @app.post("/api/runs/delete-bulk")
 async def api_delete_runs_bulk(scope: str = "all") -> JSONResponse:
     scope_key = (scope or "all").strip().lower()
-    if scope_key not in ("all", "uploaded"):
-        raise HTTPException(status_code=400, detail="scope must be 'all' or 'uploaded'")
+    if scope_key not in ("all", "uploaded", "failed"):
+        raise HTTPException(status_code=400, detail="scope must be 'all', 'uploaded', or 'failed'")
     runs = store.list_runs(limit=5000)
     if scope_key == "uploaded":
         runs = [r for r in runs if _run_is_uploaded(r)]
+    elif scope_key == "failed":
+        runs = [r for r in runs if r.get("status") in ("failed", "stopped")]
     deleted: list[int] = []
     skipped: list[dict[str, Any]] = []
     for run in runs:
@@ -585,6 +596,180 @@ async def api_delete_runs_bulk(scope: str = "all") -> JSONResponse:
             "skipped": skipped,
         }
     )
+
+
+@app.post("/api/runs/delete-failed")
+async def api_delete_failed_runs() -> JSONResponse:
+    """Delete all failed and stopped runs from disk and database."""
+    return await api_delete_runs_bulk(scope="failed")
+
+
+@app.post("/api/runs/{run_id}/stop")
+def api_stop_run(run_id: int) -> JSONResponse:
+    run = store.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.get("status") not in ("running", "queued"):
+        return JSONResponse({
+            "status": "ignored",
+            "message": f"Run {run_id} is not currently running or queued (status: {run.get('status')})",
+            "run_id": run_id,
+        })
+
+    from src import job_control
+
+    job_control.request_stop_run(run_id)
+    store.stop_run(run_id, reason="Stopped by user from dashboard")
+
+    topic = str(run.get("topic") or "")
+    fmt = str(run.get("format") or "short")
+    key = _job_key(topic, fmt)
+    with _running_lock:
+        _running_jobs.discard(key)
+
+    return JSONResponse({"status": "stopped", "run_id": run_id, "topic": topic})
+
+
+@app.post("/api/stop-all")
+def api_stop_all() -> JSONResponse:
+    from src import job_control
+
+    stopped_ids = job_control.request_stop_all()
+    for rid in stopped_ids:
+        store.stop_run(rid, reason="Stopped all runs by user")
+
+    with store.db() as conn:
+        rows = conn.execute("SELECT id FROM runs WHERE status IN ('running', 'queued')").fetchall()
+        for row in rows:
+            rid = int(row["id"])
+            if rid not in stopped_ids:
+                store.stop_run(rid, reason="Stopped all runs by user")
+
+    with _running_lock:
+        _running_jobs.clear()
+
+    job_control.reset_stop_all()
+    return JSONResponse({"status": "stopped_all", "stopped_run_ids": stopped_ids})
+
+
+@app.post("/api/runs/{run_id}/retry")
+async def api_retry_run(
+    run_id: int,
+    background_tasks: BackgroundTasks,
+    mock: bool = False,
+    force_upload: bool = False,
+) -> JSONResponse:
+    run = store.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.get("status") in ("running", "queued"):
+        raise HTTPException(status_code=409, detail=f"Run {run_id} is already running or queued")
+
+    topic = str(run.get("topic") or "").strip()
+    fmt = str(run.get("format") or "short").strip()
+    key = _job_key(topic, fmt)
+
+    from src import job_control
+
+    job_control.clear_stop(run_id, topic)
+
+    with _running_lock:
+        if key in _running_jobs:
+            raise HTTPException(status_code=409, detail=f"Topic '{topic}' is already running or queued")
+        _running_jobs.add(key)
+
+    store.queue_run_for_retry(run_id)
+
+    def _bg_retry() -> None:
+        from src.job_control import JobStoppedError, check_stop
+        from src.pipeline import retry_single_topic
+
+        try:
+            check_stop(run_id, topic)
+            with _generate_semaphore:
+                check_stop(run_id, topic)
+                retry_single_topic(
+                    run_id,
+                    mock=mock,
+                    skip_upload=not _youtube_enabled(),
+                    force_upload=force_upload,
+                )
+        except JobStoppedError:
+            logger.info("Queued retry %s for %s stopped by user", run_id, topic)
+            store.stop_run(run_id, reason="Stopped by user")
+        except Exception:
+            logger.exception("Retry failed for run %s", run_id)
+        finally:
+            with _running_lock:
+                _running_jobs.discard(key)
+
+    background_tasks.add_task(_bg_retry)
+    return JSONResponse({"status": "retry_queued", "run_id": run_id, "topic": topic})
+
+
+@app.post("/api/retry-failed")
+def api_retry_failed(
+    background_tasks: BackgroundTasks,
+    mock: bool = False,
+) -> JSONResponse:
+    failed_runs = store.list_failed_runs()
+    if not failed_runs:
+        return JSONResponse({"status": "none", "message": "No failed or stopped runs found to retry"})
+
+    runs_to_retry = [(int(r["id"]), str(r.get("topic") or ""), str(r.get("format") or "short")) for r in failed_runs]
+
+    from src import job_control
+
+    for rid, topic, fmt in runs_to_retry:
+        job_control.clear_stop(rid, topic)
+        store.queue_run_for_retry(rid)
+
+    def _bg_batch_retry() -> None:
+        from src.job_control import JobStoppedError, check_stop
+        from src.pipeline import retry_single_topic
+
+        for rid, topic, fmt in runs_to_retry:
+            key = _job_key(topic, fmt)
+            try:
+                check_stop(rid, topic)
+            except JobStoppedError:
+                logger.info("Batch retry cancelled by stop request")
+                store.stop_run(rid, reason="Stopped by user while queued")
+                break
+
+            curr = store.get_run(rid)
+            if curr and curr.get("status") == "stopped":
+                logger.info("Retry run %s was stopped while queued; skipping", rid)
+                continue
+
+            with _generate_semaphore:
+                try:
+                    check_stop(rid, topic)
+                    with _running_lock:
+                        if key in _running_jobs:
+                            continue
+                        _running_jobs.add(key)
+                    retry_single_topic(
+                        rid,
+                        mock=mock,
+                        skip_upload=not _youtube_enabled(),
+                    )
+                except JobStoppedError:
+                    logger.info("Queued retry %s for %s stopped by user", rid, topic)
+                    store.stop_run(rid, reason="Stopped by user")
+                    break
+                except Exception:
+                    logger.exception("Batch retry failed for run %s", rid)
+                finally:
+                    with _running_lock:
+                        _running_jobs.discard(key)
+
+    background_tasks.add_task(_bg_batch_retry)
+    return JSONResponse({
+        "status": "retry_queued",
+        "retrying_run_ids": [r[0] for r in runs_to_retry],
+    })
+
 
 
 @app.post("/api/runs/{run_id}/upload")
@@ -640,21 +825,31 @@ async def api_generate(
     key = _job_key(topic, fmt)
     with _running_lock:
         if key in _running_jobs:
-            raise HTTPException(status_code=409, detail="That topic is already generating")
+            raise HTTPException(status_code=409, detail="That topic is already generating or queued")
+        _running_jobs.add(key)
+
+    run_date = local_run_date()
+    rid = store.create_run(topic, fmt, run_date, status="queued")
+    store.append_step_log(rid, "queued", f"Generation queued for {topic}")
 
     def _bg() -> None:
+        from src.job_control import JobStoppedError, check_stop
         from src.pipeline import run_topic
 
-        with _running_lock:
-            _running_jobs.add(key)
         try:
+            check_stop(rid, topic)
             with _generate_semaphore:
+                check_stop(rid, topic)
                 run_topic(
                     topic,
                     fmt,
                     skip_upload=not _youtube_enabled(),
                     mock=mock,
+                    existing_run_id=rid,
                 )
+        except JobStoppedError:
+            logger.info("Job %s for %s stopped by user", rid, topic)
+            store.stop_run(rid, reason="Stopped by user")
         except Exception:
             logger.exception("Background generate failed for %s %s", fmt, topic)
         finally:
@@ -662,7 +857,7 @@ async def api_generate(
                 _running_jobs.discard(key)
 
     background_tasks.add_task(_bg)
-    return JSONResponse({"status": "started", "topic": topic, "format": fmt})
+    return JSONResponse({"status": "queued", "run_id": rid, "topic": topic, "format": fmt})
 
 
 @app.get("/api/schedule")
