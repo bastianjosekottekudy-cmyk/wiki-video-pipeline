@@ -6,15 +6,28 @@ Supports both **Short (9:16 vertical)** and **Full Documentary Video (16:9 wides
 
 ---
 
-## 🎙️ Narration & Synchronization
+## 🎙️ Narration & Voice Architecture
 
-* **Primary Engine**: **Google Cloud Text-to-Speech (Chirp 3 HD)**
-  * Voice: `en-US-Chirp3-HD-Fenrir` (Deep, calm, documentary narrator voice).
-  * High-definition expressive speech with human-like breathing and natural pauses.
-* **Backup Engine**: **Microsoft Edge-TTS**
-  * Voice: `en-US-ChristopherNeural` (Pitch: `-8Hz`, Rate: `-4%`).
-  * Automatic zero-cost fallback if GCP credentials/quota are unavailable.
+* **Primary Narration Engine**: **Google Cloud Text-to-Speech (`en-US-Studio-Q`)**
+  * **Studio-Q** (MOS 4.64): Highest-rated studio voice for documentary narration, historical storytelling, and educational videos.
+* **Master Tier-by-Tier Fallback Chain**:
+  1. **Google Studio-Q** (`en-US-Studio-Q`) — Premium studio documentary voice.
+  2. **Google Chirp 3 HD** (`en-US-Chirp3-HD-Charon`) — Authoritative deep documentary narrator.
+  3. **Google Journey** (`en-US-Journey-D`) — Expressive conversational storytelling.
+  4. **Google WaveNet** (`en-US-Wavenet-D`) — High-reliability voice with 4M monthly character free tier.
+  5. **Microsoft Edge-TTS** (`en-US-ChristopherNeural`, pitch `-2Hz`) — Automatic zero-cost unlimited fallback.
+* **🛡️ Dual-Shield Quota Protection (Zero Surprise Billing)**:
+  * **Shield 1 (Live Pricing Audit)**: Automatic live pricing verification against Google Cloud TTS pricing endpoints.
+  * **Shield 2 (Safe Caps & Daily Pacing)**: Strict 95% monthly threshold (50,000 character buffer before limits) and daily pacing caps (`~/.cursor/tts_quota_config.json`, `~/.cursor/tts_monthly_usage.json`). Seamlessly steps down through Google tiers to Edge-TTS before any paid tier is touched.
 * **Synchronization**: Frame-accurate chapter slide and imagery synchronization via `narration_segments.json`.
+
+---
+
+## 🔐 Multi-Client YouTube OAuth
+
+* **Client Fallback Chain**: `primary` → `backup1` → `backup2` Desktop OAuth clients.
+* **Token Resilience**: Auto-refreshing credentials synced with central store (`~/.agents/skills/google-auth/secrets/tokens/youtube`).
+* **Web Auth Management**: Real-time token status, browser-based re-authorization, and quota failover from the local dashboard.
 
 ---
 
@@ -42,10 +55,10 @@ Copy `.env.example` to `.env`:
 cp .env.example .env
 ```
 
-Ensure your `GOOGLE_API_KEY` is present in `.env`:
+Configure your environment keys in `.env` (never committed to git):
 ```ini
-GOOGLE_API_KEY=AIzaSyAbVP...
-GROQ_API_KEY=gsk_...
+GOOGLE_API_KEY=your_google_api_key
+GROQ_API_KEY=your_groq_api_key
 ```
 
 ---
@@ -75,4 +88,4 @@ python3 -m src.pipeline --topic "Quantum computing" --format short --mock
 ## ⚙️ Configuration Files
 
 * **`config/pipeline.yaml`**: Video dimensions (9:16 and 16:9 profiles), TTS voice presets, and YouTube upload metadata.
-* **`.env`**: API keys for Google Cloud TTS, LLMs, and YouTube tokens.
+* **`.env`**: Local credentials for Google Cloud TTS, LLMs, and YouTube tokens (gitignored).

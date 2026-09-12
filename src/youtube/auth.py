@@ -107,7 +107,13 @@ def _is_invalid_grant(exc: BaseException) -> bool:
 def _sync_token_to_central_store(client_id: str, token_path: Path) -> None:
     try:
         candidates = [
-            Path("/run/media/bastianj/B29409DC9409A447/Users/USER/.cursor/skills/google-auth/secrets/tokens/youtube")
+            Path.home()
+            / ".agents"
+            / "skills"
+            / "google-auth"
+            / "secrets"
+            / "tokens"
+            / "youtube"
             / client_id
             / "token.json",
             Path.home()

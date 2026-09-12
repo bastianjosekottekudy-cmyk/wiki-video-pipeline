@@ -1,5 +1,5 @@
 concurrency_enabled: true
-max_parallel_jobs: 5
+max_parallel_jobs: 6
 web:
   host: 127.0.0.1
   port: 8082
@@ -22,11 +22,11 @@ video:
   codec: auto
   concat_after_clips: 12
 tts:
-  provider: chirp3
-  gcp_voice: en-US-Chirp3-HD-Fenrir
+  provider: studio
+  gcp_voice: en-US-Studio-Q
   backup_voice: en-US-ChristopherNeural
-  backup_pitch: -8Hz
-  backup_rate: -4%
+  backup_pitch: -2Hz
+  backup_rate: 0%
   segment_pause_sec: 0.4
 script:
   provider: chain
@@ -61,7 +61,7 @@ schedule:
   hour: 20
   minute: 0
   timezone: Asia/Kolkata
-  daily_topics_count: 5
+  daily_topics_count: 6
   auto_upload: true
 topics:
   pool:
@@ -100,6 +100,56 @@ topics:
   - Voyager Golden Record
   - Homo floresiensis
   - Great Silence
+  - Hubble Deep Field
+  - Minoan civilization
+  - Great Pyramid of Giza
+  - "G\xF6bekli Tepe"
+  - Pioneer anomaly
+  - Mysterious Universe
+  - Mona Lisa
+  - Dark matter
+  - Wright brothers
+  - Higgs boson
+  - Hoba meteorite
+  - Dyatlov Pass incident
+  - LIGO
+  - Sutton Hoo
+  - Klerksdorp spheres
+  - Babbage's analytical engine
+  - Hedy Lamarr
+  - CERN
+  - "L 20e \u03B1-class battleship"
+  - Leah LaBelle
+  - Homo naledi
+  - Great Filter
+  - Dyson sphere
+  - Hawking radiation
+  - Fermat's Last Theorem
+  - Vagrant Story
+  - Edvard August Vainio
+  - Battle of Valcour Island
+  - Cherry Valentine
+  - Jill Valentine
+  - "Bose\u2013Einstein condensate"
+  - Sumerian king list
+  - Oort cloud
+  - Pacific blue-eye
+  - Pacific swift
+  - Packers sweep
+  - Deepika Padukone
+  - Pah Wongso Pendekar Boediman
+  - Paint Drying
+  - Paint It Black
+  - Neutron star merger
+  - Wow! signal
+  - Etruscan language
+  - Tesla coil
+  - Silk Road (trade network)
+  - Japanese battleship Yamashiro
+  - Japanese battleship Yamato
+  - Yamato-class battleship
+  - Yan Ruisheng
+  - The Yankee
   categories:
   - Science & Astronomy
   - Ancient History & Archaeology
