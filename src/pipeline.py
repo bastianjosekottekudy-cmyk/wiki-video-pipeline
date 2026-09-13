@@ -18,7 +18,12 @@ if _system_ffmpeg and "IMAGEIO_FFMPEG_EXE" not in os.environ:
     os.environ["IMAGEIO_FFMPEG_EXE"] = _system_ffmpeg
 
 from src.audio.tts import generate_narration
-from src.config import format_profile, local_run_date, run_output_dir
+from src.config import (
+    format_profile,
+    local_run_date,
+    run_output_dir,
+    should_delete_after_upload,
+)
 from src.db import store
 from src.images.fetcher import fetch_article_images
 from src.job_control import JobStoppedError, check_stop, register_run, unregister_run
@@ -52,12 +57,40 @@ def _load_article_payload(run: dict[str, Any]) -> tuple[dict[str, Any], list[dic
     return {}, []
 
 
-def attempt_youtube_upload(run_id: int, video_path: str) -> str | None:
+def attempt_youtube_upload(
+    run_id: int,
+    video_path: str,
+    delete_after_upload: bool | None = None,
+    force_upload: bool = False,
+) -> str | None:
     from src.youtube.uploader import YouTubeUploadError, upload_video
 
     run = store.get_run(run_id)
     if not run:
         return None
+
+    topic_str = str(run.get("topic") or "").strip()
+    wiki_title_str = str(run.get("wiki_title") or "").strip()
+
+    # Prevent re-uploading an already uploaded topic
+    if not force_upload:
+        if (
+            run.get("upload_status") == "uploaded"
+            and run.get("youtube_video_id")
+            and run.get("youtube_video_id") != "skipped"
+        ):
+            logger.info("Run %s already uploaded as %s; skipping re-upload", run_id, run.get("youtube_video_id"))
+            return str(run.get("youtube_video_id"))
+
+        if (
+            store.is_topic_uploaded(topic_str, exclude_run_id=run_id)
+            or (wiki_title_str and store.is_topic_uploaded(wiki_title_str, exclude_run_id=run_id))
+        ):
+            logger.warning("Topic %r is already uploaded to YouTube; skipping re-upload for run %s", topic_str, run_id)
+            store.set_upload_status(run_id, "none", upload_error=None)
+            store.append_step_log(run_id, "upload", f"Topic '{topic_str}' already uploaded to YouTube; skipped re-upload")
+            return None
+
     article, credits = _load_article_payload(run)
     if not article:
         article = {
@@ -86,6 +119,31 @@ def attempt_youtube_upload(run_id: int, video_path: str) -> str | None:
             str(run.get("wiki_title") or article.get("title") or ""),
             run_id=run_id,
         )
+        if should_delete_after_upload(delete_after_upload):
+            try:
+                p = Path(video_path)
+                if p.is_file():
+                    p.unlink()
+                    logger.info(
+                        "Deleted local video after upload for run %s: %s",
+                        run_id,
+                        video_path,
+                    )
+                    store.append_step_log(
+                        run_id, "cleanup", f"Deleted local video: {p.name}"
+                    )
+                store.mark_run_dashboard_deleted(run_id)
+                logger.info("Removed uploaded run %s from dashboard", run_id)
+                store.append_step_log(
+                    run_id, "cleanup", "Deleted uploaded item from dashboard"
+                )
+            except Exception as del_exc:
+                logger.warning(
+                    "Failed to delete local video/dashboard item for run %s (%s): %s",
+                    run_id,
+                    video_path,
+                    del_exc,
+                )
         return youtube_id
     except YouTubeUploadError as exc:
         msg = str(exc)
@@ -117,6 +175,7 @@ def run_topic(
     *,
     skip_upload: bool = True,
     force_upload: bool = False,
+    delete_after_upload: bool | None = None,
     mock: bool = False,
     existing_run_id: int | None = None,
 ) -> int:
@@ -137,13 +196,29 @@ def run_topic(
         check_stop(run_id, topic)
         store.append_step_log(run_id, "wiki", "Resolving Wikipedia article")
         article = resolve_article(topic, fmt, out_dir, mock=mock)
-        check_stop(run_id, topic)
+        wiki_title = str(article.get("title") or topic).strip()
         store.update_run(
             run_id,
-            wiki_title=article.get("title") or topic,
+            wiki_title=wiki_title,
             wiki_url=article.get("url") or "",
         )
-        store.append_step_log(run_id, "wiki", str(article.get("title") or topic))
+        store.append_step_log(run_id, "wiki", wiki_title)
+
+        # Early check: if the resolved canonical Wikipedia article has already been uploaded, stop immediately
+        if not force_upload and store.is_topic_uploaded(wiki_title, exclude_run_id=run_id):
+            logger.warning(
+                "Resolved Wikipedia article %r for topic %r has already been uploaded to YouTube; skipping generation for run %s",
+                wiki_title,
+                topic,
+                run_id,
+            )
+            store.finish_run(run_id, "stopped", error_message=f"Article '{wiki_title}' already uploaded to YouTube")
+            store.append_step_log(
+                run_id,
+                "wiki",
+                f"Article '{wiki_title}' already uploaded to YouTube; skipped duplicate generation",
+            )
+            return run_id
 
         check_stop(run_id, topic)
         store.append_step_log(run_id, "images", "Fetching free images")
@@ -178,21 +253,23 @@ def run_topic(
         store.update_run(run_id, video_path=video_path)
         store.append_step_log(run_id, "render", Path(video_path).name)
 
-        # Record topic as used/uploaded immediately so future runs never duplicate it
-        store.record_uploaded_topic(
-            topic,
-            str(article.get("title") or topic),
-            run_id=run_id,
-        )
-
         should_upload = force_upload or (not skip_upload and _youtube_enabled())
         if should_upload:
             check_stop(run_id, topic)
-            attempt_youtube_upload(run_id, video_path)
+            attempt_youtube_upload(
+                run_id,
+                video_path,
+                delete_after_upload=delete_after_upload,
+                force_upload=force_upload,
+            )
         else:
             store.append_step_log(run_id, "upload", "Skipped (local only)")
 
         store.finish_run(run_id, "success")
+        if should_upload and should_delete_after_upload(delete_after_upload):
+            curr_run = store.get_run(run_id)
+            if curr_run and curr_run.get("upload_status") == "uploaded":
+                store.mark_run_dashboard_deleted(run_id)
         logger.info("Run %s complete: %s", run_id, video_path)
         return run_id
     except JobStoppedError as exc:
@@ -214,6 +291,7 @@ def retry_single_topic(
     mock: bool = False,
     skip_upload: bool = True,
     force_upload: bool = False,
+    delete_after_upload: bool | None = None,
 ) -> int:
     """
     Retry a failed or stopped run, reusing its existing run record.
@@ -237,6 +315,7 @@ def retry_single_topic(
         fmt=fmt,
         skip_upload=skip_upload,
         force_upload=force_upload,
+        delete_after_upload=delete_after_upload,
         mock=mock,
         existing_run_id=run_id,
     )
@@ -368,6 +447,19 @@ def main() -> None:
         help="short = 9:16 up to 180s; video = 16:9 uncapped",
     )
     parser.add_argument("--upload", action="store_true", help="Upload to YouTube after render")
+    parser.add_argument(
+        "--delete-after-upload",
+        action="store_true",
+        default=None,
+        help="Delete local video file after successful YouTube upload (default: true)",
+    )
+    parser.add_argument(
+        "--keep-video",
+        "--no-delete-after-upload",
+        dest="delete_after_upload",
+        action="store_false",
+        help="Keep local video file after YouTube upload (do not auto-delete)",
+    )
     parser.add_argument("--mock", action="store_true", help="Skip Wikipedia; placeholder images")
     args = parser.parse_args()
 
@@ -377,6 +469,7 @@ def main() -> None:
         args.fmt,
         skip_upload=not args.upload,
         force_upload=args.upload,
+        delete_after_upload=args.delete_after_upload,
         mock=args.mock,
     )
 

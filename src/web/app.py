@@ -27,6 +27,8 @@ from src.config import (
     load_pipeline_concurrency,
     load_pipeline_config,
     load_schedule_config,
+    should_delete_after_upload,
+    update_delete_after_upload,
     update_pipeline_concurrency,
     update_schedule_config,
 )
@@ -338,7 +340,7 @@ def _upload_run_video(run_id: int) -> None:
         return
     from src.pipeline import attempt_youtube_upload
 
-    attempt_youtube_upload(run_id, str(path))
+    attempt_youtube_upload(run_id, str(path), delete_after_upload=should_delete_after_upload())
 
 
 def _retry_failed_uploads() -> None:
@@ -455,6 +457,7 @@ async def index(
                 "is_running": "daily_batch" in _running_jobs,
             },
             "topics": get_topics_status(),
+            "delete_after_upload": should_delete_after_upload(),
         },
     )
 
@@ -850,6 +853,27 @@ async def api_upload_run(run_id: int, background_tasks: BackgroundTasks) -> JSON
     if (run.get("upload_status") or "") == "uploading":
         raise HTTPException(status_code=409, detail="Upload already in progress")
 
+    topic = str(run.get("topic") or "").strip()
+    wiki_title = str(run.get("wiki_title") or "").strip()
+    if (
+        run.get("upload_status") == "uploaded"
+        and run.get("youtube_video_id")
+        and run.get("youtube_video_id") != "skipped"
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=f"This video has already been uploaded to YouTube (ID: {run.get('youtube_video_id')}).",
+        )
+
+    if (
+        store.is_topic_uploaded(topic, exclude_run_id=run_id)
+        or (wiki_title and store.is_topic_uploaded(wiki_title, exclude_run_id=run_id))
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Topic '{topic}' has already been uploaded to YouTube in another run.",
+        )
+
     with _upload_lock:
         if run_id in _uploading_runs:
             raise HTTPException(status_code=409, detail="Upload already in progress")
@@ -887,6 +911,12 @@ async def api_generate(
         raise HTTPException(status_code=400, detail="topic is required")
     if fmt not in ("short", "video"):
         raise HTTPException(status_code=400, detail="format must be short or video")
+
+    if not mock and store.is_topic_uploaded(topic):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Topic '{topic}' has already been uploaded to YouTube.",
+        )
 
     key = _job_key(topic, fmt)
     with _running_lock:
@@ -990,6 +1020,40 @@ async def api_set_concurrency(request: Request) -> JSONResponse:
             "active_jobs": _generate_semaphore.active_count,
         }
     )
+
+
+@app.get("/api/settings/delete-after-upload")
+async def api_get_delete_after_upload() -> JSONResponse:
+    return JSONResponse({"ok": True, "enabled": should_delete_after_upload()})
+
+
+@app.post("/api/settings/delete-after-upload")
+async def api_set_delete_after_upload(request: Request) -> JSONResponse:
+    payload: dict[str, Any] = {}
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+    else:
+        try:
+            form = await request.form()
+            for k, v in form.items():
+                payload[k] = v
+        except Exception:
+            payload = {}
+
+    enabled = True
+    if "enabled" in payload:
+        val = payload["enabled"]
+        if isinstance(val, bool):
+            enabled = val
+        elif isinstance(val, str):
+            enabled = val.strip().lower() in ("true", "1", "on", "yes")
+
+    updated = update_delete_after_upload(enabled)
+    return JSONResponse({"ok": True, "enabled": updated})
 
 
 @app.get("/api/schedule")

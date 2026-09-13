@@ -84,17 +84,33 @@ def init_db() -> None:
             ("article_json", "TEXT"),
             ("upload_status", "TEXT NOT NULL DEFAULT 'none'"),
             ("upload_error", "TEXT"),
+            ("dashboard_deleted", "INTEGER NOT NULL DEFAULT 0"),
         ):
             _ensure_column(conn, "runs", column, decl)
 
-        # Seed uploaded_topics from existing runs that succeeded, are running, or had upload attempts
+        # Remove false/stale entries in uploaded_topics linked to runs that failed upload or were never uploaded
+        conn.execute(
+            """
+            DELETE FROM uploaded_topics
+            WHERE run_id IN (
+                SELECT id FROM runs
+                WHERE upload_status != 'uploaded'
+                   OR youtube_video_id IS NULL
+                   OR youtube_video_id = ''
+                   OR youtube_video_id = 'skipped'
+            )
+            """
+        )
+
+        # Seed uploaded_topics only from runs that actually succeeded uploading to YouTube
         existing_runs = conn.execute(
             """
             SELECT id, topic, wiki_title, finished_at, started_at, run_date
             FROM runs
-            WHERE (status IN ('success', 'running')
-                   OR upload_status IN ('uploaded', 'uploading', 'failed')
-                   OR (youtube_video_id IS NOT NULL AND youtube_video_id != ''))
+            WHERE upload_status = 'uploaded'
+              AND youtube_video_id IS NOT NULL
+              AND youtube_video_id != ''
+              AND youtube_video_id != 'skipped'
               AND topic IS NOT NULL AND TRIM(topic) != ''
             """
         ).fetchall()
@@ -338,14 +354,27 @@ def delete_run(run_id: int) -> bool:
         return cur.rowcount > 0
 
 
+def mark_run_dashboard_deleted(run_id: int) -> bool:
+    """Mark a run as removed from the dashboard view after automatic deletion."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE runs SET dashboard_deleted = 1 WHERE id = ?",
+            (run_id,),
+        )
+        return cur.rowcount > 0
+
+
 def list_runs(
     fmt: str | None = None,
     run_date: str | None = None,
     limit: int = 200,
+    include_dashboard_deleted: bool = False,
 ) -> list[dict[str, Any]]:
     query = "SELECT * FROM runs"
     clauses: list[str] = []
     params: list[Any] = []
+    if not include_dashboard_deleted:
+        clauses.append("(dashboard_deleted = 0 OR dashboard_deleted IS NULL)")
     if fmt:
         clauses.append("format = ?")
         params.append(fmt.lower())
@@ -364,7 +393,11 @@ def list_runs(
 def list_run_dates() -> list[str]:
     with db() as conn:
         rows = conn.execute(
-            "SELECT DISTINCT run_date FROM runs ORDER BY run_date DESC"
+            """
+            SELECT DISTINCT run_date FROM runs
+            WHERE (dashboard_deleted = 0 OR dashboard_deleted IS NULL)
+            ORDER BY run_date DESC
+            """
         ).fetchall()
         return [row[0] for row in rows]
 
@@ -435,10 +468,14 @@ def count_runs_today() -> dict[str, int]:
 
 
 def normalize_topic_key(topic: str) -> str:
-    """Normalize topic for collision-free comparison (casing, punctuation, spacing)."""
+    """Normalize topic for collision-free comparison (casing, punctuation, spacing, parentheticals)."""
     if not topic:
         return ""
-    cleaned = re.sub(r"[^\w\s]", " ", topic.lower().strip())
+    # Strip parenthetical qualifiers (e.g. "Silk Road (trade network)" -> "Silk Road")
+    stripped = re.sub(r"\s*\([^)]*\)", "", topic).strip()
+    if not stripped:
+        stripped = topic
+    cleaned = re.sub(r"[^\w\s]", " ", stripped.lower().strip())
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
@@ -473,12 +510,18 @@ def record_uploaded_topic(
                 )
 
 
-def get_uploaded_topics() -> set[str]:
-    """Return set of normalized topic keys and wiki titles that have been uploaded or used."""
+def get_uploaded_topics(exclude_run_id: int | None = None) -> set[str]:
+    """Return set of normalized topic keys and wiki titles that have been successfully uploaded to YouTube."""
     with db() as conn:
         seen: set[str] = set()
         # 1. From uploaded_topics table
-        rows = conn.execute("SELECT topic_norm, wiki_title FROM uploaded_topics").fetchall()
+        if exclude_run_id is not None:
+            rows = conn.execute(
+                "SELECT topic_norm, wiki_title FROM uploaded_topics WHERE run_id != ? OR run_id IS NULL",
+                (exclude_run_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT topic_norm, wiki_title FROM uploaded_topics").fetchall()
         for r in rows:
             if r[0]:
                 seen.add(r[0])
@@ -487,16 +530,21 @@ def get_uploaded_topics() -> set[str]:
                 if norm_w:
                     seen.add(norm_w)
 
-        # 2. From runs table (any run that succeeded, is running, is queued, or has upload history)
-        runs = conn.execute(
-            """
+        # 2. From runs table: ONLY runs that were ACTUALLY uploaded to YouTube
+        query = """
             SELECT topic, wiki_title FROM runs
-            WHERE (status IN ('success', 'running', 'queued')
-                   OR upload_status IN ('uploaded', 'uploading', 'failed')
-                   OR (youtube_video_id IS NOT NULL AND youtube_video_id != ''))
+            WHERE upload_status = 'uploaded'
+              AND youtube_video_id IS NOT NULL
+              AND youtube_video_id != ''
+              AND youtube_video_id != 'skipped'
               AND topic IS NOT NULL AND TRIM(topic) != ''
-            """
-        ).fetchall()
+        """
+        params: list[Any] = []
+        if exclude_run_id is not None:
+            query += " AND id != ?"
+            params.append(exclude_run_id)
+
+        runs = conn.execute(query, params).fetchall()
         for r in runs:
             norm_t = normalize_topic_key(r[0])
             if norm_t:
@@ -509,12 +557,12 @@ def get_uploaded_topics() -> set[str]:
         return seen
 
 
-def is_topic_uploaded(topic: str) -> bool:
-    """Check if a topic or title was previously uploaded."""
+def is_topic_uploaded(topic: str, exclude_run_id: int | None = None) -> bool:
+    """Check if a topic or title was previously uploaded to YouTube."""
     norm = normalize_topic_key(topic)
     if not norm:
         return False
-    return norm in get_uploaded_topics()
+    return norm in get_uploaded_topics(exclude_run_id=exclude_run_id)
 
 
 def list_uploaded_topics(limit: int = 100) -> list[dict[str, Any]]:

@@ -27,6 +27,11 @@
         </div>
         <span id="concurrency-status-msg" class="concurrency-status-msg"></span>
       </div>
+      <label class="toggle" title="Automatically delete local video after successful YouTube upload">
+        <input type="checkbox" id="delete-after-upload-toggle" {% if delete_after_upload %}checked{% endif %} onchange="updateDeleteAfterUpload()">
+        <span>Delete video after upload</span>
+      </label>
+      <span id="delete-after-upload-status-msg" class="concurrency-status-msg"></span>
       <label class="toggle">
         <input type="checkbox" id="mock-toggle">
         <span>Mock data</span>
@@ -332,6 +337,37 @@
           if (badge) {
             badge.textContent = data.enabled ? `⚡ Concurrency: ${data.max_parallel_jobs} max` : '⏸ Sequential (1 at a time)';
             badge.className = data.enabled ? 'concurrency-badge' : 'concurrency-badge sequential';
+          }
+        } else {
+          if (statusMsg) {
+            statusMsg.textContent = data.detail || 'Error saving';
+            statusMsg.className = 'concurrency-status-msg error';
+          }
+        }
+      } catch (err) {
+        if (statusMsg) {
+          statusMsg.textContent = 'Network error';
+          statusMsg.className = 'concurrency-status-msg error';
+        }
+      }
+    }
+
+    async function updateDeleteAfterUpload() {
+      const toggle = document.getElementById('delete-after-upload-toggle');
+      const statusMsg = document.getElementById('delete-after-upload-status-msg');
+      const enabled = toggle ? toggle.checked : true;
+      try {
+        const res = await fetch('/api/settings/delete-after-upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: enabled }),
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+          if (statusMsg) {
+            statusMsg.textContent = 'Saved!';
+            statusMsg.className = 'concurrency-status-msg success';
+            setTimeout(() => { if (statusMsg.textContent === 'Saved!') statusMsg.textContent = ''; }, 2000);
           }
         } else {
           if (statusMsg) {

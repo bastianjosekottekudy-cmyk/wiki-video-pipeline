@@ -223,3 +223,47 @@ def run_output_dir(run_date: str, fmt: str, run_id: int | None = None) -> Path:
         path = path / f"run_{run_id}"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def should_delete_after_upload(override: bool | None = None) -> bool:
+    """
+    Check if local video should be deleted after successful YouTube upload.
+    Precedence: override argument > DELETE_AFTER_UPLOAD env var > config > True (default).
+    """
+    if override is not None:
+        return bool(override)
+    env_val = get_env("DELETE_AFTER_UPLOAD", "").strip().lower()
+    if env_val in ("false", "0", "no"):
+        return False
+    if env_val in ("true", "1", "yes"):
+        return True
+    try:
+        cfg = load_pipeline_config()
+        return bool(cfg.get("youtube", {}).get("delete_after_upload", True))
+    except Exception:
+        return True
+
+
+def update_delete_after_upload(enabled: bool) -> bool:
+    """Dynamically update youtube.delete_after_upload in config/pipeline.yaml."""
+    path = CONFIG_DIR / "pipeline.yaml"
+    text = path.read_text(encoding="utf-8")
+    val_str = "true" if enabled else "false"
+    if re.search(r"^\s*delete_after_upload\s*:.*$", text, flags=re.MULTILINE):
+        text = re.sub(
+            r"^(\s*delete_after_upload\s*:).*$",
+            rf"\g<1> {val_str}",
+            text,
+            flags=re.MULTILINE,
+        )
+    elif re.search(r"^youtube\s*:.*$", text, flags=re.MULTILINE):
+        text = re.sub(
+            r"^(youtube\s*:.*)$",
+            rf"\1\n  delete_after_upload: {val_str}",
+            text,
+            flags=re.MULTILINE,
+        )
+    else:
+        text += f"\nyoutube:\n  delete_after_upload: {val_str}\n"
+    path.write_text(text, encoding="utf-8")
+    return bool(enabled)

@@ -47,6 +47,7 @@ youtube:
     client_secrets: secrets/clients/backup2/client_secrets.json
     token: secrets/clients/backup2/token.json
   enabled: true
+  delete_after_upload: true
   category_id: '27'
   privacy: public
   made_for_kids: false
@@ -103,7 +104,7 @@ topics:
   - Hubble Deep Field
   - Minoan civilization
   - Great Pyramid of Giza
-  - "G\xF6bekli Tepe"
+  - Göbekli Tepe
   - Pioneer anomaly
   - Mysterious Universe
   - Mona Lisa
@@ -118,7 +119,7 @@ topics:
   - Babbage's analytical engine
   - Hedy Lamarr
   - CERN
-  - "L 20e \u03B1-class battleship"
+  - L 20e α-class battleship
   - Leah LaBelle
   - Homo naledi
   - Great Filter
@@ -130,7 +131,7 @@ topics:
   - Battle of Valcour Island
   - Cherry Valentine
   - Jill Valentine
-  - "Bose\u2013Einstein condensate"
+  - Bose–Einstein condensate
   - Sumerian king list
   - Oort cloud
   - Pacific blue-eye
@@ -144,12 +145,21 @@ topics:
   - Wow! signal
   - Etruscan language
   - Tesla coil
-  - Silk Road (trade network)
   - Japanese battleship Yamashiro
   - Japanese battleship Yamato
   - Yamato-class battleship
   - Yan Ruisheng
   - The Yankee
+  - Wolfram Alpha
+  - CERN Large Hadron Collider
+  - Kepler-186f
+  - Roswell incident
+  - R U Professional
+  - R.E.M.
+  - RAAF area commands
+  - Jean-Joseph Rabearivelo
+  - Isidor Rabi
+  - Race Against Time (Lewis book)
   categories:
   - Science & Astronomy
   - Ancient History & Archaeology
