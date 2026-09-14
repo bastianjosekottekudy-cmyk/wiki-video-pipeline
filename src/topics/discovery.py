@@ -135,7 +135,7 @@ def replenish_topics_pool(count: int = 10) -> list[str]:
     cfg = load_topics_config()
     current_pool = list(cfg.get("pool") or [])
     current_keys = {store.normalize_topic_key(t) for t in current_pool}
-    uploaded_keys = store.get_uploaded_topics()
+    covered_keys = store.get_covered_topics()
 
     candidates: list[str] = []
 
@@ -143,7 +143,7 @@ def replenish_topics_pool(count: int = 10) -> list[str]:
     categories = cfg.get("categories") or []
     for topic in _generate_llm_topic_candidates(categories, count=count * 2):
         norm = store.normalize_topic_key(topic)
-        if norm and norm not in current_keys and norm not in uploaded_keys and not store.is_topic_uploaded(topic):
+        if norm and norm not in current_keys and norm not in covered_keys and not store.is_topic_covered(topic):
             candidates.append(topic)
             current_keys.add(norm)
             if len(candidates) >= count:
@@ -153,7 +153,7 @@ def replenish_topics_pool(count: int = 10) -> list[str]:
     if len(candidates) < count:
         for topic in _fetch_wikipedia_featured_candidates(limit=60):
             norm = store.normalize_topic_key(topic)
-            if norm and norm not in current_keys and norm not in uploaded_keys and not store.is_topic_uploaded(topic):
+            if norm and norm not in current_keys and norm not in covered_keys and not store.is_topic_covered(topic):
                 candidates.append(topic)
                 current_keys.add(norm)
                 if len(candidates) >= count:
@@ -163,7 +163,7 @@ def replenish_topics_pool(count: int = 10) -> list[str]:
     if len(candidates) < count:
         for topic in _fetch_simple_wiki_random_candidates(limit=30):
             norm = store.normalize_topic_key(topic)
-            if norm and norm not in current_keys and norm not in uploaded_keys and not store.is_topic_uploaded(topic):
+            if norm and norm not in current_keys and norm not in covered_keys and not store.is_topic_covered(topic):
                 candidates.append(topic)
                 current_keys.add(norm)
                 if len(candidates) >= count:
@@ -180,7 +180,7 @@ def replenish_topics_pool(count: int = 10) -> list[str]:
 def pick_random_topics(count: int = 1) -> list[str]:
     """
     Select non-repeated topics for shorts generation.
-    Excludes any topic that was previously uploaded.
+    Excludes any topic that was previously covered (completed video, running/queued, or uploaded).
     Priority:
       1. Configured topic pool in pipeline.yaml (auto-replenished when low)
       2. Wikipedia featured/vital articles
@@ -196,18 +196,18 @@ def pick_random_topics(count: int = 1) -> list[str]:
     chosen_keys: set[str] = set()
 
     # Priority 1: Configured pool
-    unuploaded_pool = [t for t in pool if not store.is_topic_uploaded(t)]
+    uncovered_pool = [t for t in pool if not store.is_topic_covered(t)]
 
-    # Auto-refill pool if un-uploaded topics are running low (< 5 remaining)
-    if len(unuploaded_pool) < 5:
-        logger.info("Topic pool has only %d un-uploaded topic(s) remaining; auto-refilling...", len(unuploaded_pool))
-        replenish_topics_pool(count=10)
+    # Auto-refill pool if un-covered topics are running low (< 10 remaining)
+    if len(uncovered_pool) < 10:
+        logger.info("Topic pool has only %d un-covered topic(s) remaining; auto-refilling...", len(uncovered_pool))
+        replenish_topics_pool(count=20)
         cfg = load_topics_config()
         pool = cfg.get("pool") or []
-        unuploaded_pool = [t for t in pool if not store.is_topic_uploaded(t)]
+        uncovered_pool = [t for t in pool if not store.is_topic_covered(t)]
 
-    if unuploaded_pool:
-        shuffled = list(unuploaded_pool)
+    if uncovered_pool:
+        shuffled = list(uncovered_pool)
         random.shuffle(shuffled)
         for topic in shuffled:
             norm = store.normalize_topic_key(topic)
@@ -225,7 +225,7 @@ def pick_random_topics(count: int = 1) -> list[str]:
     random.shuffle(featured)
     for topic in featured:
         norm = store.normalize_topic_key(topic)
-        if norm not in chosen_keys and not store.is_topic_uploaded(topic):
+        if norm not in chosen_keys and not store.is_topic_covered(topic):
             chosen.append(topic)
             chosen_keys.add(norm)
             if len(chosen) >= count:
@@ -237,7 +237,7 @@ def pick_random_topics(count: int = 1) -> list[str]:
     random.shuffle(simple_candidates)
     for topic in simple_candidates:
         norm = store.normalize_topic_key(topic)
-        if norm not in chosen_keys and not store.is_topic_uploaded(topic):
+        if norm not in chosen_keys and not store.is_topic_covered(topic):
             chosen.append(topic)
             chosen_keys.add(norm)
             if len(chosen) >= count:
@@ -248,7 +248,7 @@ def pick_random_topics(count: int = 1) -> list[str]:
     llm_candidates = _generate_llm_topic_candidates(categories, count=count * 3)
     for topic in llm_candidates:
         norm = store.normalize_topic_key(topic)
-        if norm not in chosen_keys and not store.is_topic_uploaded(topic):
+        if norm not in chosen_keys and not store.is_topic_covered(topic):
             chosen.append(topic)
             chosen_keys.add(norm)
             if len(chosen) >= count:
@@ -269,12 +269,13 @@ def get_topics_status() -> dict[str, Any]:
     categories = cfg.get("categories") or []
 
     uploaded_keys = store.get_uploaded_topics()
-    unuploaded_pool = [t for t in pool if store.normalize_topic_key(t) not in uploaded_keys]
+    covered_keys = store.get_covered_topics()
+    uncovered_pool = [t for t in pool if store.normalize_topic_key(t) not in covered_keys]
 
     return {
         "pool_total": len(pool),
-        "pool_remaining": len(unuploaded_pool),
-        "pool_remaining_topics": unuploaded_pool,
+        "pool_remaining": len(uncovered_pool),
+        "pool_remaining_topics": uncovered_pool,
         "uploaded_count": len(uploaded_keys),
         "categories": categories,
         "recent_uploaded": store.list_uploaded_topics(limit=15),

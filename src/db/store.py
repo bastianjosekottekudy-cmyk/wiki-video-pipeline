@@ -76,6 +76,16 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS topic_aliases (
+                alias_norm TEXT PRIMARY KEY,
+                canonical_norm TEXT NOT NULL,
+                canonical_title TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         for column, decl in (
             ("format", "TEXT"),
             ("topic", "TEXT"),
@@ -468,14 +478,19 @@ def count_runs_today() -> dict[str, int]:
 
 
 def normalize_topic_key(topic: str) -> str:
-    """Normalize topic for collision-free comparison (casing, punctuation, spacing, parentheticals)."""
+    """Normalize topic for collision-free comparison (casing, punctuation, spacing, parentheticals, acronym dots)."""
     if not topic:
         return ""
+    # Strip Wikipedia URL prefix if present
+    t = re.sub(r"^https?://[^/]+/wiki/", "", topic.strip())
     # Strip parenthetical qualifiers (e.g. "Silk Road (trade network)" -> "Silk Road")
-    stripped = re.sub(r"\s*\([^)]*\)", "", topic).strip()
+    stripped = re.sub(r"\s*\([^)]*\)", "", t).strip()
     if not stripped:
-        stripped = topic
-    cleaned = re.sub(r"[^\w\s]", " ", stripped.lower().strip())
+        stripped = t
+    # Normalize acronym dots (e.g. "R.E.M." -> "REM", "U.S.A." -> "USA")
+    acronym_cleaned = re.sub(r"(?<=\b[a-zA-Z])\.(?=[a-zA-Z](\.|\b))", "", stripped)
+    acronym_cleaned = re.sub(r"\.", "", acronym_cleaned)
+    cleaned = re.sub(r"[^\w\s]", " ", acronym_cleaned.lower().strip())
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
@@ -554,7 +569,49 @@ def get_uploaded_topics(exclude_run_id: int | None = None) -> set[str]:
                 if norm_w:
                     seen.add(norm_w)
 
+        # 3. Expand seen with topic aliases (if canonical is uploaded, alias is also marked uploaded)
+        alias_rows = conn.execute("SELECT alias_norm, canonical_norm FROM topic_aliases").fetchall()
+        for a_norm, c_norm in alias_rows:
+            if c_norm in seen:
+                seen.add(a_norm)
+            elif a_norm in seen:
+                seen.add(c_norm)
+
         return seen
+
+
+def record_topic_alias(alias: str, canonical_title: str) -> None:
+    """Record a known alias/redirect from an alias topic to its canonical Wikipedia title."""
+    alias_norm = normalize_topic_key(alias)
+    canonical_norm = normalize_topic_key(canonical_title)
+    if not alias_norm or not canonical_norm or alias_norm == canonical_norm:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO topic_aliases (alias_norm, canonical_norm, canonical_title, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(alias_norm) DO UPDATE SET
+                canonical_norm = excluded.canonical_norm,
+                canonical_title = excluded.canonical_title,
+                created_at = excluded.created_at
+            """,
+            (alias_norm, canonical_norm, canonical_title.strip(), now),
+        )
+
+
+def resolve_topic_alias(alias: str) -> str | None:
+    """Return the canonical title for an alias if known, or None."""
+    alias_norm = normalize_topic_key(alias)
+    if not alias_norm:
+        return None
+    with db() as conn:
+        row = conn.execute(
+            "SELECT canonical_title FROM topic_aliases WHERE alias_norm = ?",
+            (alias_norm,),
+        ).fetchone()
+        return str(row[0]) if row else None
 
 
 def is_topic_uploaded(topic: str, exclude_run_id: int | None = None) -> bool:
@@ -563,6 +620,59 @@ def is_topic_uploaded(topic: str, exclude_run_id: int | None = None) -> bool:
     if not norm:
         return False
     return norm in get_uploaded_topics(exclude_run_id=exclude_run_id)
+
+
+def get_covered_topics(exclude_run_id: int | None = None) -> set[str]:
+    """Return set of normalized topic keys and wiki titles that have been covered:
+    either already uploaded, completed successfully (video rendered), or actively running/queued.
+    """
+    seen: set[str] = set()
+    # 1. From uploaded topics
+    seen.update(get_uploaded_topics(exclude_run_id=exclude_run_id))
+
+    # 2. From runs table: successful runs, or active runs (running/queued)
+    with db() as conn:
+        query = """
+            SELECT topic, wiki_title FROM runs
+            WHERE (dashboard_deleted = 0 OR dashboard_deleted IS NULL)
+              AND (
+                  status IN ('success', 'running', 'queued')
+                  OR upload_status IN ('uploaded', 'uploading')
+              )
+              AND topic IS NOT NULL AND TRIM(topic) != ''
+        """
+        params: list[Any] = []
+        if exclude_run_id is not None:
+            query += " AND id != ?"
+            params.append(exclude_run_id)
+
+        runs = conn.execute(query, params).fetchall()
+        for r in runs:
+            norm_t = normalize_topic_key(r[0])
+            if norm_t:
+                seen.add(norm_t)
+            if r[1]:
+                norm_w = normalize_topic_key(r[1])
+                if norm_w:
+                    seen.add(norm_w)
+
+        # 3. Expand with aliases
+        alias_rows = conn.execute("SELECT alias_norm, canonical_norm FROM topic_aliases").fetchall()
+        for a_norm, c_norm in alias_rows:
+            if c_norm in seen:
+                seen.add(a_norm)
+            elif a_norm in seen:
+                seen.add(c_norm)
+
+    return seen
+
+
+def is_topic_covered(topic: str, exclude_run_id: int | None = None) -> bool:
+    """Check if a topic or title has already been covered (uploaded or locally rendered/active)."""
+    norm = normalize_topic_key(topic)
+    if not norm:
+        return False
+    return norm in get_covered_topics(exclude_run_id=exclude_run_id)
 
 
 def list_uploaded_topics(limit: int = 100) -> list[dict[str, Any]]:

@@ -402,7 +402,8 @@ def _group_by_date(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _job_key(topic: str, fmt: str) -> str:
-    return f"{fmt}:{topic.strip().lower()}"
+    norm = store.normalize_topic_key(topic)
+    return f"{fmt}:{norm}" if norm else f"{fmt}:{topic.strip().lower()}"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -912,11 +913,12 @@ async def api_generate(
     if fmt not in ("short", "video"):
         raise HTTPException(status_code=400, detail="format must be short or video")
 
-    if not mock and store.is_topic_uploaded(topic):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Topic '{topic}' has already been uploaded to YouTube.",
-        )
+    if not mock and store.is_topic_covered(topic):
+        if store.is_topic_uploaded(topic):
+            detail_msg = f"Topic '{topic}' has already been uploaded to YouTube."
+        else:
+            detail_msg = f"Topic '{topic}' is already covered (video already generated or currently in progress)."
+        raise HTTPException(status_code=409, detail=detail_msg)
 
     key = _job_key(topic, fmt)
     with _running_lock:

@@ -18,6 +18,7 @@ if _system_ffmpeg and "IMAGEIO_FFMPEG_EXE" not in os.environ:
     os.environ["IMAGEIO_FFMPEG_EXE"] = _system_ffmpeg
 
 from src.audio.tts import generate_narration
+from src.concurrency import ConcurrencyConflictError, topic_locks
 from src.config import (
     format_profile,
     local_run_date,
@@ -65,107 +66,112 @@ def attempt_youtube_upload(
 ) -> str | None:
     from src.youtube.uploader import YouTubeUploadError, upload_video
 
-    run = store.get_run(run_id)
-    if not run:
-        return None
-
-    topic_str = str(run.get("topic") or "").strip()
-    wiki_title_str = str(run.get("wiki_title") or "").strip()
-
-    # Prevent re-uploading an already uploaded topic
-    if not force_upload:
-        if (
-            run.get("upload_status") == "uploaded"
-            and run.get("youtube_video_id")
-            and run.get("youtube_video_id") != "skipped"
-        ):
-            logger.info("Run %s already uploaded as %s; skipping re-upload", run_id, run.get("youtube_video_id"))
-            return str(run.get("youtube_video_id"))
-
-        if (
-            store.is_topic_uploaded(topic_str, exclude_run_id=run_id)
-            or (wiki_title_str and store.is_topic_uploaded(wiki_title_str, exclude_run_id=run_id))
-        ):
-            logger.warning("Topic %r is already uploaded to YouTube; skipping re-upload for run %s", topic_str, run_id)
-            store.set_upload_status(run_id, "none", upload_error=None)
-            store.append_step_log(run_id, "upload", f"Topic '{topic_str}' already uploaded to YouTube; skipped re-upload")
-            return None
-
-    article, credits = _load_article_payload(run)
-    if not article:
-        article = {
-            "title": run.get("wiki_title") or run.get("topic") or "Wikipedia",
-            "url": run.get("wiki_url") or "",
-            "topic": run.get("topic") or "",
-        }
-    store.set_upload_status(run_id, "uploading", upload_error=None)
-    store.append_step_log(run_id, "upload", "Uploading to YouTube")
     try:
-        youtube_id = upload_video(
-            video_path,
-            article,
-            credits,
-            str(run.get("format") or "short"),
-            str(run.get("run_date") or local_run_date()),
-        )
-        store.set_upload_status(
-            run_id, "uploaded", youtube_video_id=youtube_id, upload_error=None
-        )
-        store.append_step_log(
-            run_id, "upload", f"Uploaded https://www.youtube.com/watch?v={youtube_id}"
-        )
-        store.record_uploaded_topic(
-            str(run.get("topic") or ""),
-            str(run.get("wiki_title") or article.get("title") or ""),
-            run_id=run_id,
-        )
-        if should_delete_after_upload(delete_after_upload):
+        with topic_locks.lock_upload(run_id):
+            run = store.get_run(run_id)
+            if not run:
+                return None
+
+            topic_str = str(run.get("topic") or "").strip()
+            wiki_title_str = str(run.get("wiki_title") or "").strip()
+
+            # Prevent re-uploading an already uploaded topic
+            if not force_upload:
+                if (
+                    run.get("upload_status") == "uploaded"
+                    and run.get("youtube_video_id")
+                    and run.get("youtube_video_id") != "skipped"
+                ):
+                    logger.info("Run %s already uploaded as %s; skipping re-upload", run_id, run.get("youtube_video_id"))
+                    return str(run.get("youtube_video_id"))
+
+                if (
+                    store.is_topic_uploaded(topic_str, exclude_run_id=run_id)
+                    or (wiki_title_str and store.is_topic_uploaded(wiki_title_str, exclude_run_id=run_id))
+                ):
+                    logger.warning("Topic %r is already uploaded to YouTube; skipping re-upload for run %s", topic_str, run_id)
+                    store.set_upload_status(run_id, "none", upload_error=None)
+                    store.append_step_log(run_id, "upload", f"Topic '{topic_str}' already uploaded to YouTube; skipped re-upload")
+                    return None
+
+            article, credits = _load_article_payload(run)
+            if not article:
+                article = {
+                    "title": run.get("wiki_title") or run.get("topic") or "Wikipedia",
+                    "url": run.get("wiki_url") or "",
+                    "topic": run.get("topic") or "",
+                }
+            store.set_upload_status(run_id, "uploading", upload_error=None)
+            store.append_step_log(run_id, "upload", "Uploading to YouTube")
             try:
-                p = Path(video_path)
-                if p.is_file():
-                    p.unlink()
-                    logger.info(
-                        "Deleted local video after upload for run %s: %s",
-                        run_id,
-                        video_path,
-                    )
-                    store.append_step_log(
-                        run_id, "cleanup", f"Deleted local video: {p.name}"
-                    )
-                store.mark_run_dashboard_deleted(run_id)
-                logger.info("Removed uploaded run %s from dashboard", run_id)
-                store.append_step_log(
-                    run_id, "cleanup", "Deleted uploaded item from dashboard"
-                )
-            except Exception as del_exc:
-                logger.warning(
-                    "Failed to delete local video/dashboard item for run %s (%s): %s",
-                    run_id,
+                youtube_id = upload_video(
                     video_path,
-                    del_exc,
+                    article,
+                    credits,
+                    str(run.get("format") or "short"),
+                    str(run.get("run_date") or local_run_date()),
                 )
-        return youtube_id
-    except YouTubeUploadError as exc:
-        msg = str(exc)
-        if "upload skipped" in msg.lower():
-            logger.info("YouTube upload skipped for run %s: %s", run_id, exc)
-            store.set_upload_status(run_id, "none", upload_error=None)
-            store.append_step_log(run_id, "upload", msg)
-            return None
-        logger.warning("YouTube upload failed for run %s: %s", run_id, exc)
-        store.set_upload_status(run_id, "failed", upload_error=msg)
-        store.append_step_log(run_id, "upload", f"Upload failed: {exc}")
-        from src.scheduler import sync_failed_upload_retry_job
+                store.set_upload_status(
+                    run_id, "uploaded", youtube_video_id=youtube_id, upload_error=None
+                )
+                store.append_step_log(
+                    run_id, "upload", f"Uploaded https://www.youtube.com/watch?v={youtube_id}"
+                )
+                store.record_uploaded_topic(
+                    str(run.get("topic") or ""),
+                    str(run.get("wiki_title") or article.get("title") or ""),
+                    run_id=run_id,
+                )
+                if should_delete_after_upload(delete_after_upload):
+                    try:
+                        p = Path(video_path)
+                        if p.is_file():
+                            p.unlink()
+                            logger.info(
+                                "Deleted local video after upload for run %s: %s",
+                                run_id,
+                                video_path,
+                            )
+                            store.append_step_log(
+                                run_id, "cleanup", f"Deleted local video: {p.name}"
+                            )
+                        store.mark_run_dashboard_deleted(run_id)
+                        logger.info("Removed uploaded run %s from dashboard", run_id)
+                        store.append_step_log(
+                            run_id, "cleanup", "Deleted uploaded item from dashboard"
+                        )
+                    except Exception as del_exc:
+                        logger.warning(
+                            "Failed to delete local video/dashboard item for run %s (%s): %s",
+                            run_id,
+                            video_path,
+                            del_exc,
+                        )
+                return youtube_id
+            except YouTubeUploadError as exc:
+                msg = str(exc)
+                if "upload skipped" in msg.lower():
+                    logger.info("YouTube upload skipped for run %s: %s", run_id, exc)
+                    store.set_upload_status(run_id, "none", upload_error=None)
+                    store.append_step_log(run_id, "upload", msg)
+                    return None
+                logger.warning("YouTube upload failed for run %s: %s", run_id, exc)
+                store.set_upload_status(run_id, "failed", upload_error=msg)
+                store.append_step_log(run_id, "upload", f"Upload failed: {exc}")
+                from src.scheduler import sync_failed_upload_retry_job
 
-        sync_failed_upload_retry_job()
-        return None
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Unexpected YouTube upload error for run %s", run_id)
-        store.set_upload_status(run_id, "failed", upload_error=str(exc))
-        store.append_step_log(run_id, "upload", f"Upload failed: {exc}")
-        from src.scheduler import sync_failed_upload_retry_job
+                sync_failed_upload_retry_job()
+                return None
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Unexpected YouTube upload error for run %s", run_id)
+                store.set_upload_status(run_id, "failed", upload_error=str(exc))
+                store.append_step_log(run_id, "upload", f"Upload failed: {exc}")
+                from src.scheduler import sync_failed_upload_retry_job
 
-        sync_failed_upload_retry_job()
+                sync_failed_upload_retry_job()
+                return None
+    except ConcurrencyConflictError as exc:
+        logger.warning("Upload already in progress for run %s: %s", run_id, exc)
         return None
 
 
@@ -175,6 +181,7 @@ def run_topic(
     *,
     skip_upload: bool = True,
     force_upload: bool = False,
+    is_manual_rerun: bool = False,
     delete_after_upload: bool | None = None,
     mock: bool = False,
     existing_run_id: int | None = None,
@@ -185,104 +192,136 @@ def run_topic(
     if not topic:
         raise ValueError("topic is required")
 
-    run_date = local_run_date()
-    run_id = existing_run_id or store.create_run(topic, fmt, run_date)
-    store.update_run(run_id, status="running")
-    out_dir = run_output_dir(run_date, fmt, run_id)
-    register_run(run_id, topic)
-    store.append_step_log(run_id, "start", f"{fmt} · {topic}")
-
     try:
-        check_stop(run_id, topic)
-        store.append_step_log(run_id, "wiki", "Resolving Wikipedia article")
-        article = resolve_article(topic, fmt, out_dir, mock=mock)
-        wiki_title = str(article.get("title") or topic).strip()
-        store.update_run(
-            run_id,
-            wiki_title=wiki_title,
-            wiki_url=article.get("url") or "",
-        )
-        store.append_step_log(run_id, "wiki", wiki_title)
+        with topic_locks.lock_topic(topic, fmt):
+            run_date = local_run_date()
+            run_id = existing_run_id or store.create_run(topic, fmt, run_date)
+            store.update_run(run_id, status="running")
+            out_dir = run_output_dir(run_date, fmt, run_id)
+            register_run(run_id, topic)
+            store.append_step_log(run_id, "start", f"{fmt} · {topic}")
 
-        # Early check: if the resolved canonical Wikipedia article has already been uploaded, stop immediately
-        if not force_upload and store.is_topic_uploaded(wiki_title, exclude_run_id=run_id):
-            logger.warning(
-                "Resolved Wikipedia article %r for topic %r has already been uploaded to YouTube; skipping generation for run %s",
-                wiki_title,
-                topic,
-                run_id,
-            )
-            store.finish_run(run_id, "stopped", error_message=f"Article '{wiki_title}' already uploaded to YouTube")
-            store.append_step_log(
-                run_id,
-                "wiki",
-                f"Article '{wiki_title}' already uploaded to YouTube; skipped duplicate generation",
-            )
-            return run_id
+            try:
+                check_stop(run_id, topic)
 
-        check_stop(run_id, topic)
-        store.append_step_log(run_id, "images", "Fetching free images")
-        credits = fetch_article_images(article, out_dir, mock=mock)
-        check_stop(run_id, topic)
-        payload = {"article": article, "credits": credits}
-        store.update_run(run_id, article_json=json.dumps(payload))
+                # Early check: if the topic itself is already covered, stop immediately
+                if not is_manual_rerun and not force_upload and store.is_topic_covered(topic, exclude_run_id=run_id):
+                    logger.warning(
+                        "Topic %r is already covered (completed video or uploaded); skipping generation for run %s",
+                        topic,
+                        run_id,
+                    )
+                    store.finish_run(run_id, "stopped", error_message=f"Topic '{topic}' already covered")
+                    store.mark_run_dashboard_deleted(run_id)
+                    store.append_step_log(
+                        run_id,
+                        "start",
+                        f"Topic '{topic}' already covered; skipped duplicate generation",
+                    )
+                    return run_id
 
-        check_stop(run_id, topic)
-        store.append_step_log(run_id, "script", "Writing narration")
-        script = generate_script(article, fmt, out_dir)
-        check_stop(run_id, topic)
-        script_path = out_dir / "script.txt"
-        store.update_run(run_id, script_path=str(script_path))
+                store.append_step_log(run_id, "wiki", "Resolving Wikipedia article")
+                article = resolve_article(topic, fmt, out_dir, mock=mock)
+                wiki_title = str(article.get("title") or topic).strip()
+                store.update_run(
+                    run_id,
+                    wiki_title=wiki_title,
+                    wiki_url=article.get("url") or "",
+                )
+                store.append_step_log(run_id, "wiki", wiki_title)
 
-        check_stop(run_id, topic)
-        store.append_step_log(run_id, "tts", "Generating speech")
-        audio_path = generate_narration(script_path, out_dir)
+                # Record alias if Wikipedia title differs from input topic
+                if wiki_title and wiki_title != topic:
+                    store.record_topic_alias(topic, wiki_title)
 
-        check_stop(run_id, topic)
-        store.append_step_log(run_id, "render", f"Rendering {fmt}")
-        video_path = render_video(
-            str(article.get("title") or topic),
-            fmt,
-            run_date,
-            audio_path,
-            out_dir,
-            script=script,
-            image_paths=[c["path"] for c in credits if c.get("path")],
-        )
-        check_stop(run_id, topic)
-        store.update_run(run_id, video_path=video_path)
-        store.append_step_log(run_id, "render", Path(video_path).name)
+                # Early check: if the resolved canonical Wikipedia article has already been covered, stop immediately
+                if not is_manual_rerun and not force_upload and store.is_topic_covered(wiki_title, exclude_run_id=run_id):
+                    logger.warning(
+                        "Resolved Wikipedia article %r for topic %r has already been covered; skipping generation for run %s",
+                        wiki_title,
+                        topic,
+                        run_id,
+                    )
+                    store.finish_run(run_id, "stopped", error_message=f"Article '{wiki_title}' already covered")
+                    store.mark_run_dashboard_deleted(run_id)
+                    store.append_step_log(
+                        run_id,
+                        "wiki",
+                        f"Article '{wiki_title}' already covered; skipped duplicate generation",
+                    )
+                    return run_id
 
-        should_upload = force_upload or (not skip_upload and _youtube_enabled())
-        if should_upload:
-            check_stop(run_id, topic)
-            attempt_youtube_upload(
-                run_id,
-                video_path,
-                delete_after_upload=delete_after_upload,
-                force_upload=force_upload,
-            )
-        else:
-            store.append_step_log(run_id, "upload", "Skipped (local only)")
+                with topic_locks.lock_wiki(wiki_title):
+                    check_stop(run_id, topic)
+                    store.append_step_log(run_id, "images", "Fetching free images")
+                    credits = fetch_article_images(article, out_dir, mock=mock)
+                    check_stop(run_id, topic)
+                    payload = {"article": article, "credits": credits}
+                    store.update_run(run_id, article_json=json.dumps(payload))
 
-        store.finish_run(run_id, "success")
-        if should_upload and should_delete_after_upload(delete_after_upload):
-            curr_run = store.get_run(run_id)
-            if curr_run and curr_run.get("upload_status") == "uploaded":
-                store.mark_run_dashboard_deleted(run_id)
-        logger.info("Run %s complete: %s", run_id, video_path)
-        return run_id
-    except JobStoppedError as exc:
-        logger.warning("Run %s stopped: %s", run_id, exc)
-        store.stop_run(run_id, reason="Stopped by user")
+                    check_stop(run_id, topic)
+                    store.append_step_log(run_id, "script", "Writing narration")
+                    script = generate_script(article, fmt, out_dir)
+                    check_stop(run_id, topic)
+                    script_path = out_dir / "script.txt"
+                    store.update_run(run_id, script_path=str(script_path))
+
+                    check_stop(run_id, topic)
+                    store.append_step_log(run_id, "tts", "Generating speech")
+                    audio_path = generate_narration(script_path, out_dir)
+
+                    check_stop(run_id, topic)
+                    store.append_step_log(run_id, "render", f"Rendering {fmt}")
+                    video_path = render_video(
+                        str(article.get("title") or topic),
+                        fmt,
+                        run_date,
+                        audio_path,
+                        out_dir,
+                        script=script,
+                        image_paths=[c["path"] for c in credits if c.get("path")],
+                    )
+                    check_stop(run_id, topic)
+                    store.update_run(run_id, video_path=video_path)
+                    store.append_step_log(run_id, "render", Path(video_path).name)
+
+                    should_upload = force_upload or (not skip_upload and _youtube_enabled())
+                    if should_upload:
+                        check_stop(run_id, topic)
+                        attempt_youtube_upload(
+                            run_id,
+                            video_path,
+                            delete_after_upload=delete_after_upload,
+                            force_upload=force_upload,
+                        )
+                    else:
+                        store.append_step_log(run_id, "upload", "Skipped (local only)")
+
+                    store.finish_run(run_id, "success")
+                    if should_upload and should_delete_after_upload(delete_after_upload):
+                        curr_run = store.get_run(run_id)
+                        if curr_run and curr_run.get("upload_status") == "uploaded":
+                            store.mark_run_dashboard_deleted(run_id)
+                    logger.info("Run %s complete: %s", run_id, video_path)
+                    return run_id
+            except JobStoppedError as exc:
+                logger.warning("Run %s stopped: %s", run_id, exc)
+                store.stop_run(run_id, reason="Stopped by user")
+                raise
+            except Exception as exc:
+                logger.exception("Run %s failed", run_id)
+                store.finish_run(run_id, "failed", error_message=str(exc))
+                store.append_step_log(run_id, "error", str(exc))
+                raise
+            finally:
+                unregister_run(run_id)
+    except ConcurrencyConflictError as exc:
+        logger.warning("Duplicate execution blocked for %r: %s", topic, exc)
+        if existing_run_id:
+            store.finish_run(existing_run_id, "stopped", error_message=str(exc))
+            store.mark_run_dashboard_deleted(existing_run_id)
+            return existing_run_id
         raise
-    except Exception as exc:
-        logger.exception("Run %s failed", run_id)
-        store.finish_run(run_id, "failed", error_message=str(exc))
-        store.append_step_log(run_id, "error", str(exc))
-        raise
-    finally:
-        unregister_run(run_id)
 
 
 def retry_single_topic(
@@ -315,6 +354,7 @@ def retry_single_topic(
         fmt=fmt,
         skip_upload=skip_upload,
         force_upload=force_upload,
+        is_manual_rerun=True,
         delete_after_upload=delete_after_upload,
         mock=mock,
         existing_run_id=run_id,
@@ -354,8 +394,8 @@ def run_scheduled_shorts_batch(
     run_date = local_run_date()
     queued_items: list[tuple[int, str]] = []
     for topic in topics:
-        if store.is_topic_uploaded(topic):
-            logger.warning("Topic %r already has completed video/upload; skipping duplicate", topic)
+        if store.is_topic_covered(topic):
+            logger.warning("Topic %r is already covered (completed video, running, or uploaded); skipping duplicate", topic)
             continue
         rid = store.create_run(topic, "short", run_date, status="queued")
         store.append_step_log(rid, "queued", f"Batch run queued for {topic}")
@@ -382,7 +422,7 @@ def run_scheduled_shorts_batch(
                 topic,
                 fmt="short",
                 skip_upload=not auto_upload,
-                force_upload=auto_upload,
+                force_upload=False,
                 mock=mock,
                 existing_run_id=rid,
             )
