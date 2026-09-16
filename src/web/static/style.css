@@ -495,7 +495,8 @@ a { color: #7eb6ff; }
 }
 
 .thumb-player.portrait,
-.detail-player.portrait {
+.detail-player.portrait,
+.placeholder.portrait {
   aspect-ratio: 9 / 16;
   max-height: 520px;
   margin: 0 auto;

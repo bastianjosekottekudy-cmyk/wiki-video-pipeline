@@ -254,7 +254,7 @@ def run_topic(
                 with topic_locks.lock_wiki(wiki_title):
                     check_stop(run_id, topic)
                     store.append_step_log(run_id, "images", "Fetching free images")
-                    credits = fetch_article_images(article, out_dir, mock=mock)
+                    credits = fetch_article_images(article, out_dir, fmt=fmt, mock=mock)
                     check_stop(run_id, topic)
                     payload = {"article": article, "credits": credits}
                     store.update_run(run_id, article_json=json.dumps(payload))

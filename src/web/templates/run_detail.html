@@ -57,13 +57,13 @@
     <p class="hint">YouTube title: <code>{{ run.video_title }}</code></p>
     <p class="hint">Stored at <code>{{ run.video_path }}</code></p>
     {% elif run.status == 'running' %}
-    <div class="placeholder">Video is still generating…</div>
+    <div class="placeholder {% if run.format == 'short' %}portrait{% endif %}">Video is still generating…</div>
     {% elif run.status == 'queued' %}
-    <div class="placeholder queued">Video is queued (waiting for worker slot)…</div>
+    <div class="placeholder queued {% if run.format == 'short' %}portrait{% endif %}">Video is queued (waiting for worker slot)…</div>
     {% elif run.status == 'stopped' %}
-    <div class="placeholder stopped">Generation stopped by user</div>
+    <div class="placeholder stopped {% if run.format == 'short' %}portrait{% endif %}">Generation stopped by user</div>
     {% else %}
-    <div class="placeholder">No local video file for this run.</div>
+    <div class="placeholder {% if run.format == 'short' %}portrait{% endif %}">No local video file for this run.</div>
     {% endif %}
   </section>
 

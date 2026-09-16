@@ -1,5 +1,5 @@
 concurrency_enabled: true
-max_parallel_jobs: 6
+max_parallel_jobs: 10
 web:
   host: 127.0.0.1
   port: 8082
@@ -59,10 +59,10 @@ youtube:
   - documentary
 schedule:
   enabled: true
-  hour: 20
-  minute: 0
+  hour: 22
+  minute: 15
   timezone: Asia/Kolkata
-  daily_topics_count: 6
+  daily_topics_count: 10
   auto_upload: true
 topics:
   pool:
@@ -180,6 +180,26 @@ topics:
   - Yugoslav torpedo boat T5
   - Yugoslav torpedo boat T6
   - Yugoslav torpedo boat T7
+  - Mohenjo-daro
+  - Lunar water
+  - Mayan calendar
+  - Rosetta mission
+  - Fermi paradox
+  - Mysterious lights
+  - Sierpinski triangle
+  - Mysterious disappearances
+  - LIGO gravitational waves
+  - Killer whale
+  - Herschel Space Observatory
+  - Pyramids of Nanjing
+  - O Captain! My Captain!
+  - O heilges Geist- und Wasserbad, BWV 165
+  - O-Bahn Busway
+  - Oakwood Cemetery (Troy, New York)
+  - Oberon (moon)
+  - USS Oberrender
+  - Bombing of Obersalzberg
+  - Ian O'Brien
   categories:
   - Science & Astronomy
   - Ancient History & Archaeology

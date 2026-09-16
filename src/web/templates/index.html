@@ -249,17 +249,17 @@
           {% if run.has_video %}
           <video class="thumb-player {% if run.format == 'short' %}portrait{% endif %}" controls preload="metadata" src="/videos/{{ run.id }}/file"></video>
           {% elif run.status == 'running' %}
-          <div class="placeholder">Generating…</div>
+          <div class="placeholder {% if run.format == 'short' %}portrait{% endif %}">Generating…</div>
           {% elif run.status == 'queued' %}
-          <div class="placeholder queued">Queued (waiting for slot)…</div>
+          <div class="placeholder queued {% if run.format == 'short' %}portrait{% endif %}">Queued (waiting for slot)…</div>
           {% elif run.status == 'stopped' %}
-          <div class="placeholder stopped">Stopped by user</div>
+          <div class="placeholder stopped {% if run.format == 'short' %}portrait{% endif %}">Stopped by user</div>
           {% elif run.display_status == 'missing' %}
-          <div class="placeholder failed">File missing on disk — safe to Delete</div>
+          <div class="placeholder failed {% if run.format == 'short' %}portrait{% endif %}">File missing on disk — safe to Delete</div>
           {% elif run.status == 'failed' %}
-          <div class="placeholder failed">Failed — see details</div>
+          <div class="placeholder failed {% if run.format == 'short' %}portrait{% endif %}">Failed — see details</div>
           {% else %}
-          <div class="placeholder">No video file</div>
+          <div class="placeholder {% if run.format == 'short' %}portrait{% endif %}">No video file</div>
           {% endif %}
           {% if run.is_uploaded and run.youtube_url %}
           <p class="meta yt-link"><a href="{{ run.youtube_url }}" target="_blank" rel="noopener">Watch on YouTube</a></p>

@@ -10,7 +10,7 @@ from urllib.parse import quote
 
 import httpx
 
-from src.config import load_pipeline_config
+from src.config import format_profile, load_pipeline_config
 from src.wiki.fetcher import USER_AGENT, WIKI_API
 
 logger = logging.getLogger(__name__)
@@ -85,7 +85,7 @@ def _page_image_infos(
             "gimlimit": str(max(limit * 3, 8)),
             "prop": "imageinfo",
             "iiprop": "url|mime|size|extmetadata",
-            "iiurlwidth": "1280",
+            "iiurlwidth": "1920",
             "format": "json",
             "formatversion": "2",
         },
@@ -112,6 +112,7 @@ def fetch_article_images(
     article: dict[str, Any],
     output_dir: Path,
     *,
+    fmt: str = "short",
     mock: bool = False,
 ) -> list[dict[str, Any]]:
     """
@@ -127,16 +128,24 @@ def fetch_article_images(
     if mock:
         from PIL import Image, ImageDraw, ImageFont
 
+        profile = format_profile(fmt)
+        width = int(profile.get("width") or (1080 if fmt == "short" else 1920))
+        height = int(profile.get("height") or (1920 if fmt == "short" else 1080))
         credits: list[dict[str, Any]] = []
         for i in range(3):
             path = dest_dir / f"mock_{i + 1}.png"
-            img = Image.new("RGB", (1280, 720), (18, 32, 56))
+            img = Image.new("RGB", (width, height), (18, 32, 56))
             draw = ImageDraw.Draw(img)
             try:
                 font = ImageFont.truetype("C:/Windows/Fonts/segoeui.ttf", 48)
             except OSError:
-                font = ImageFont.load_default()
-            draw.text((40, 320), f"{article.get('title') or 'Topic'} · {i + 1}", fill=(230, 240, 255), font=font)
+                try:
+                    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 48)
+                except OSError:
+                    font = ImageFont.load_default()
+            y_pos = int(height * (0.42 if height > width else 0.45))
+            margin = 60 if height > width else 40
+            draw.text((margin, y_pos), f"{article.get('title') or 'Topic'} · {i + 1}", fill=(230, 240, 255), font=font)
             img.save(path)
             credits.append(
                 {

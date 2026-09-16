@@ -27,6 +27,7 @@ from src.config import (
     load_pipeline_concurrency,
     load_pipeline_config,
     load_schedule_config,
+    local_run_date,
     should_delete_after_upload,
     update_delete_after_upload,
     update_pipeline_concurrency,
@@ -926,9 +927,14 @@ async def api_generate(
             raise HTTPException(status_code=409, detail="That topic is already generating or queued")
         _running_jobs.add(key)
 
-    run_date = local_run_date()
-    rid = store.create_run(topic, fmt, run_date, status="queued")
-    store.append_step_log(rid, "queued", f"Generation queued for {topic}")
+    try:
+        run_date = local_run_date()
+        rid = store.create_run(topic, fmt, run_date, status="queued")
+        store.append_step_log(rid, "queued", f"Generation queued for {topic}")
+    except Exception:
+        with _running_lock:
+            _running_jobs.discard(key)
+        raise
 
     def _bg() -> None:
         from src.job_control import JobStoppedError, check_stop
@@ -948,8 +954,9 @@ async def api_generate(
         except JobStoppedError:
             logger.info("Job %s for %s stopped by user", rid, topic)
             store.stop_run(rid, reason="Stopped by user")
-        except Exception:
+        except Exception as exc:
             logger.exception("Background generate failed for %s %s", fmt, topic)
+            store.finish_run(rid, "failed", error_message=str(exc))
         finally:
             with _running_lock:
                 _running_jobs.discard(key)
