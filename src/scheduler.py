@@ -20,9 +20,13 @@ UPLOAD_RETRY_JOB_ID = "retry-failed-uploads"
 UPLOAD_RETRY_INTERVAL_HOURS = 6
 UPLOAD_RETRY_MAX_BATCH_SIZE = 10
 
+FAILED_RUNS_RETRY_JOB_ID = "retry-failed-runs"
+FAILED_RUNS_RETRY_INTERVAL_HOURS = 1
+
 _scheduler: BackgroundScheduler | None = None
 _daily_shorts_callback: Callable[[], None] | None = None
 _retry_uploads_callback: Callable[[], None] | None = None
+_retry_failed_runs_callback: Callable[[], None] | None = None
 
 
 def _format_local(dt: datetime) -> str:
@@ -155,19 +159,58 @@ def sync_failed_upload_retry_job(*, run_in_hours: float | None = None) -> None:
         )
 
 
+def sync_failed_runs_retry_job(*, run_in_hours: float | None = None) -> None:
+    """Keep the 1-hour retry job active while recent failed/stopped runs exist."""
+    if not _scheduler or not _scheduler.running or _retry_failed_runs_callback is None:
+        return
+
+    from src.db import store
+
+    has_failed = store.count_recent_failed_runs(hours=24) > 0
+    existing = _scheduler.get_job(FAILED_RUNS_RETRY_JOB_ID)
+
+    if not has_failed:
+        if existing is not None:
+            _scheduler.remove_job(FAILED_RUNS_RETRY_JOB_ID)
+            logger.info("Cleared failed-runs retry job — no recent failed runs")
+        return
+
+    delay_h = (
+        FAILED_RUNS_RETRY_INTERVAL_HOURS if run_in_hours is None else max(0.0, float(run_in_hours))
+    )
+    next_run = datetime.now().astimezone() + timedelta(hours=delay_h)
+
+    if existing is None:
+        _scheduler.add_job(
+            _retry_failed_runs_callback,
+            trigger=IntervalTrigger(hours=FAILED_RUNS_RETRY_INTERVAL_HOURS),
+            id=FAILED_RUNS_RETRY_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=1800,
+            next_run_time=next_run,
+        )
+        logger.info(
+            "Scheduled failed-runs retry every %sh (next %s) — recent failed runs pending",
+            FAILED_RUNS_RETRY_INTERVAL_HOURS,
+            _format_local(next_run),
+        )
+
+
 def start_scheduler(
     *,
     daily_shorts_callback: Callable[[], None] | None = None,
     retry_uploads_callback: Callable[[], None] | None = None,
+    retry_failed_runs_callback: Callable[[], None] | None = None,
 ) -> BackgroundScheduler:
-    """Start the background scheduler and arm daily shorts & upload retry jobs."""
-    global _scheduler, _daily_shorts_callback, _retry_uploads_callback
+    """Start the background scheduler and arm daily shorts, upload retries, and hourly run retries."""
+    global _scheduler, _daily_shorts_callback, _retry_uploads_callback, _retry_failed_runs_callback
     if _scheduler and _scheduler.running:
         return _scheduler
 
     scheduler = BackgroundScheduler()
     _daily_shorts_callback = daily_shorts_callback
     _retry_uploads_callback = retry_uploads_callback
+    _retry_failed_runs_callback = retry_failed_runs_callback
     scheduler.start()
     _scheduler = scheduler
 
@@ -177,13 +220,17 @@ def start_scheduler(
     if retry_uploads_callback is not None:
         sync_failed_upload_retry_job()
 
+    if retry_failed_runs_callback is not None:
+        sync_failed_runs_retry_job()
+
     return scheduler
 
 
 def shutdown_scheduler() -> None:
-    global _scheduler, _daily_shorts_callback, _retry_uploads_callback
+    global _scheduler, _daily_shorts_callback, _retry_uploads_callback, _retry_failed_runs_callback
     if _scheduler and _scheduler.running:
         _scheduler.shutdown(wait=False)
     _scheduler = None
     _daily_shorts_callback = None
     _retry_uploads_callback = None
+    _retry_failed_runs_callback = None

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import concurrent.futures
 import json
 import logging
+import os
+import secrets
 import shutil
 import threading
 from collections import OrderedDict
@@ -19,6 +22,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from src.config import (
     OUTPUT_DIR,
@@ -50,7 +55,43 @@ logger = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 
+class BasicAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        user_expected = os.getenv("DASHBOARD_USERNAME")
+        pass_expected = os.getenv("DASHBOARD_PASSWORD")
+        # If credentials are not configured, allow access
+        if not user_expected or not pass_expected:
+            return await call_next(request)
+
+        # Allow external OAuth callback without auth if needed
+        if request.url.path.startswith("/api/youtube/oauth/callback"):
+            return await call_next(request)
+
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Basic "):
+            return Response(
+                content="Authentication required",
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="Wiki Video Dashboard"'},
+            )
+        try:
+            auth_decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+            username, _, password = auth_decoded.partition(":")
+            if not (
+                secrets.compare_digest(username, user_expected)
+                and secrets.compare_digest(password, pass_expected)
+            ):
+                raise ValueError("Invalid credentials")
+        except Exception:
+            return Response(
+                content="Invalid credentials",
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="Wiki Video Dashboard"'},
+            )
+        return await call_next(request)
+
 app = FastAPI(title="Wiki Video Library")
+app.add_middleware(BasicAuthMiddleware)
 app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
 
 _running_lock = threading.Lock()
@@ -392,6 +433,73 @@ def _retry_failed_uploads() -> None:
                 _uploading_runs.discard(run_id)
 
     sync_failed_upload_retry_job()
+
+
+def _retry_failed_runs() -> None:
+    """Hourly background retry for runs whose video generation failed/stopped in the last 24h."""
+    from src.scheduler import sync_failed_runs_retry_job
+
+    recent_failed = store.list_recent_failed_runs(hours=24, limit=10)
+    if not recent_failed:
+        sync_failed_runs_retry_job()
+        return
+
+    logger.info(
+        "Hourly retry worker: found %s failed/stopped run(s) from last 24h",
+        len(recent_failed),
+    )
+    from src import job_control
+    from src.job_control import JobStoppedError, check_stop
+    from src.pipeline import retry_single_topic
+
+    for run in recent_failed:
+        run_id = int(run["id"])
+        topic = str(run.get("topic") or "").strip()
+        fmt = str(run.get("format") or "short").strip()
+        key = _job_key(topic, fmt)
+
+        with _running_lock:
+            if key in _running_jobs:
+                logger.info(
+                    "Skipping hourly retry for run %s (%s) — topic already active",
+                    run_id,
+                    key,
+                )
+                continue
+            _running_jobs.add(key)
+
+        job_control.clear_stop(run_id, topic)
+        store.queue_run_for_retry(run_id)
+        store.append_step_log(run_id, "retry", "Hourly scheduled retry initiated (last 24h window)")
+
+        def _worker(rid: int, rtopic: str, rkey: str) -> None:
+            try:
+                check_stop(rid, rtopic)
+                with _generate_semaphore:
+                    check_stop(rid, rtopic)
+                    retry_single_topic(
+                        rid,
+                        skip_upload=not _youtube_enabled(),
+                    )
+            except JobStoppedError:
+                logger.info("Hourly retry %s for %s stopped by user", rid, rtopic)
+                store.stop_run(rid, reason="Stopped by user")
+            except Exception as exc:
+                logger.exception("Hourly retry failed for run %s", rid)
+                store.finish_run(rid, "failed", error_message=str(exc))
+            finally:
+                with _running_lock:
+                    _running_jobs.discard(rkey)
+                sync_failed_runs_retry_job()
+
+        threading.Thread(
+            target=_worker,
+            args=(run_id, topic, key),
+            name=f"hourly-retry-{run_id}",
+            daemon=True,
+        ).start()
+
+    sync_failed_runs_retry_job()
 
 
 def _group_by_date(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:

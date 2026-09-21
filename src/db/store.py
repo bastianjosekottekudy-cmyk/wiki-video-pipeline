@@ -9,7 +9,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -442,6 +442,37 @@ def count_failed_uploads() -> int:
             """
         ).fetchone()
         return int(row[0])
+
+
+def list_recent_failed_runs(hours: int = 24, limit: int = 20) -> list[dict[str, Any]]:
+    """Runs whose video generation failed or was stopped within the last `hours` (default 24h)."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM runs
+            WHERE status IN ('failed', 'stopped')
+              AND (started_at >= ? OR finished_at >= ?)
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (cutoff, cutoff, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def count_recent_failed_runs(hours: int = 24) -> int:
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with db() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) FROM runs
+            WHERE status IN ('failed', 'stopped')
+              AND (started_at >= ? OR finished_at >= ?)
+            """,
+            (cutoff, cutoff),
+        ).fetchone()
+        return int(row[0]) if row else 0
 
 
 def count_runs_today() -> dict[str, int]:

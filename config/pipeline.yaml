@@ -1,7 +1,7 @@
 concurrency_enabled: true
 max_parallel_jobs: 10
 web:
-  host: 127.0.0.1
+  host: 0.0.0.0
   port: 8082
 formats:
   short:
@@ -200,6 +200,46 @@ topics:
   - USS Oberrender
   - Bombing of Obersalzberg
   - Ian O'Brien
+  - Neutron star
+  - Pyramids of Giza
+  - Mysterious humming
+  - Bloop
+  - Eratosthenes' sieve
+  - Morse code
+  - Babbage engine
+  - Qalaherriaq
+  - Qatna
+  - Qibla
+  - Quagga
+  - Quainton Road railway station
+  - Quark
+  - St Botolph's Church, Quarrington
+  - Quarter sovereign
+  - Quatermass and the Pit
+  - Quatermass II
+  - Matthew Quay
+  - Battle of Quebec (1775)
+  - Quebec Agreement
+  - Kepler-452b
+  - Stonehenith
+  - Terracotta Army
+  - Cicada 3301
+  - The Wow! signal
+  - Bessemer process
+  - First flight
+  - Racer's hurricane
+  - Rachel Dyer
+  - Radar, Gun Laying, Mk. I and Mk. II
+  - Radcliffe, Greater Manchester
+  - Arthur W. Radford
+  - Radical Dreamers
+  - Radiocarbon dating
+  - Radiohead
+  - Ion Heliade Rădulescu
+  - Battle of Radzymin (1920)
+  - RAF Uxbridge
+  - Elizabeth Raffald
+  - Raffles Place MRT station
   categories:
   - Science & Astronomy
   - Ancient History & Archaeology
