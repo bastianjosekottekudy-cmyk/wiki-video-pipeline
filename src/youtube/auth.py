@@ -262,12 +262,13 @@ def probe_youtube_clients(*, attempt_refresh: bool = True) -> list[dict[str, Any
 
 
 class OAuthAuthSession:
-    def __init__(self, client: YouTubeClient, timeout: float = 180.0) -> None:
+    def __init__(self, client: YouTubeClient, timeout: float = 600.0) -> None:
         self.client = client
         self.timeout = timeout
         self.created_at = time.time()
         self.flow: InstalledAppFlow | None = None
         self.server: wsgiref.simple_server.WSGIServer | None = None
+        self.server_port: int = 0
         self.thread: threading.Thread | None = None
         self.auth_url: str = ""
         self.status: str = "pending"  # pending, completed, error, timed_out
@@ -286,6 +287,57 @@ class OAuthAuthSession:
             self.close()
             return False
         return True
+
+    def submit_callback(self, raw_input: str) -> dict[str, Any]:
+        raw = raw_input.strip()
+        if not raw:
+            return {"ok": False, "detail": "Empty authorization response"}
+        if "?" in raw:
+            query = raw.partition("?")[2]
+        elif "&" in raw or "=" in raw:
+            query = raw
+        else:
+            query = f"code={raw}"
+
+        if "error=" in query:
+            self.status = "error"
+            self.detail = "Authorization was denied by Google account."
+            return {"ok": False, "detail": self.detail}
+
+        self.received_query = query
+
+        if self.thread and self.thread.is_alive():
+            if self._completed_event.wait(timeout=10.0):
+                return self.to_dict()
+
+        try:
+            port = self.server_port or (self.server.server_port if self.server else 0)
+            authorization_response = f"https://localhost:{port}/?{self.received_query}"
+            last_exc: BaseException | None = None
+            for attempt in range(1, 6):
+                try:
+                    self.flow.fetch_token(authorization_response=authorization_response)
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    time.sleep(min(attempt * 1.5, 6))
+            else:
+                raise last_exc or RuntimeError("Failed to exchange OAuth token")
+
+            creds = self.flow.credentials
+            _save_token(creds, self.client.token, client_id=self.client.id)
+            self.status = "completed"
+            self.ok = True
+            self.detail = "Authorized successfully"
+            logger.info("Successfully authorized YouTube client %s via callback submission", self.client.id)
+            self._completed_event.set()
+            self.close()
+            return self.to_dict()
+        except Exception as exc:
+            logger.exception("Callback token exchange failed for %s: %s", self.client.id, exc)
+            self.status = "error"
+            self.detail = str(exc)[:240]
+            return self.to_dict()
 
     def start(self) -> str:
         flow = InstalledAppFlow.from_client_secrets_file(str(self.client.client_secrets), SCOPES)
@@ -327,6 +379,7 @@ class OAuthAuthSession:
         )
         local_server.timeout = 1.5
         self.server = local_server
+        self.server_port = local_server.server_port
 
         flow.redirect_uri = f"http://localhost:{local_server.server_port}/"
         auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
@@ -355,7 +408,8 @@ class OAuthAuthSession:
                 self.detail = "Authorization was denied by Google account."
                 return
 
-            authorization_response = f"https://localhost:{self.server.server_port}/?{self.received_query}"
+            port = self.server_port or (self.server.server_port if self.server else 0)
+            authorization_response = f"https://localhost:{port}/?{self.received_query}"
             last_exc: BaseException | None = None
             for attempt in range(1, 6):
                 try:
@@ -381,7 +435,7 @@ class OAuthAuthSession:
             self._completed_event.set()
             self.close()
 
-    def wait_completion(self, timeout: float = 180.0) -> bool:
+    def wait_completion(self, timeout: float = 600.0) -> bool:
         return self._completed_event.wait(timeout=timeout)
 
     def to_dict(self) -> dict[str, Any]:
@@ -407,7 +461,7 @@ _active_sessions: dict[str, OAuthAuthSession] = {}
 _session_lock = threading.Lock()
 
 
-def start_auth_session(client_id: str, timeout: float = 180.0) -> dict[str, Any]:
+def start_auth_session(client_id: str, timeout: float = 600.0) -> dict[str, Any]:
     client = get_youtube_client(client_id)
     if not client.client_secrets.is_file():
         raise FileNotFoundError(
@@ -425,6 +479,19 @@ def start_auth_session(client_id: str, timeout: float = 180.0) -> dict[str, Any]
         session.start()
         _active_sessions[client.id] = session
         return session.to_dict()
+
+
+def submit_auth_callback(client_id: str, raw_input: str) -> dict[str, Any]:
+    with _session_lock:
+        session = _active_sessions.get(client_id)
+    if not session:
+        return {
+            "id": client_id,
+            "status": "error",
+            "ok": False,
+            "detail": "No active authorization session found. Please click Authorize first.",
+        }
+    return session.submit_callback(raw_input)
 
 
 def get_auth_session_status(client_id: str) -> dict[str, Any]:

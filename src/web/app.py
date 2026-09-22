@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -26,8 +26,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
 from src.config import (
+    DEFAULT_SCHEDULE_HOUR,
+    DEFAULT_SCHEDULE_MINUTE,
+    PROJECT_ROOT,
     OUTPUT_DIR,
     add_topic_to_pool,
+    get_env,
     load_execution_config,
     load_pipeline_concurrency,
     load_pipeline_config,
@@ -45,8 +49,10 @@ from src.topics import get_topics_status
 from src.youtube.auth import (
     authorize_client_interactive,
     get_auth_session_status,
+    list_youtube_clients,
     probe_youtube_clients,
     start_auth_session,
+    submit_auth_callback,
     try_silent_refresh,
 )
 
@@ -675,6 +681,44 @@ async def youtube_client_authorize_redirect(client_id: str) -> RedirectResponse:
         )
 
 
+@app.post("/api/youtube/clients/{client_id}/submit-code")
+async def youtube_client_submit_code(client_id: str, payload: dict[str, Any] = Body(...)) -> JSONResponse:
+    if not _youtube_enabled():
+        raise HTTPException(status_code=400, detail="YouTube upload is disabled")
+    raw_input = (payload.get("url") or payload.get("code") or payload.get("query") or "").strip()
+    if not raw_input:
+        return JSONResponse({"ok": False, "detail": "Missing url or code parameter"}, status_code=400)
+    try:
+        result = submit_auth_callback(client_id, raw_input)
+        status_code = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=status_code)
+    except Exception as exc:
+        logger.exception("submit-code failed for %s: %s", client_id, exc)
+        return JSONResponse({"ok": False, "detail": str(exc)}, status_code=500)
+
+
+@app.get("/api/youtube/oauth/callback")
+async def oauth_callback(code: str = "", state: str = "", error: str = ""):
+    if error:
+        return JSONResponse({"status": "error", "message": error}, status_code=400)
+    if code:
+        query = f"code={code}"
+        if state:
+            query += f"&state={state}"
+        for client in list_youtube_clients():
+            session_status = get_auth_session_status(client.id)
+            if session_status.get("status") == "pending":
+                res = submit_auth_callback(client.id, query)
+                if res.get("ok"):
+                    return JSONResponse({"status": "ok", "message": f"{client.id}: Authorized successfully!"})
+                else:
+                    return JSONResponse({"status": "error", "message": res.get("detail", "Auth failed")}, status_code=400)
+        res = submit_auth_callback("primary", query)
+        if res.get("ok"):
+            return JSONResponse({"status": "ok", "message": "Authorized successfully!"})
+    return JSONResponse({"status": "ok", "message": "Authorization code received. You may return to the dashboard."})
+
+
 @app.get("/videos/{run_id}/file")
 async def video_file(run_id: int) -> FileResponse:
     run = store.get_run(run_id)
@@ -744,7 +788,13 @@ async def api_delete_runs_bulk(scope: str = "all") -> JSONResponse:
     if scope_key == "uploaded":
         runs = [r for r in runs if _run_is_uploaded(r)]
     elif scope_key == "failed":
-        runs = [r for r in runs if r.get("status") in ("failed", "stopped")]
+        runs = [
+            r
+            for r in runs
+            if r.get("status") in ("failed", "stopped")
+            or (not _run_is_uploaded(r) and not _video_exists(r))
+            or (r.get("upload_status") == "failed" and not _video_exists(r))
+        ]
     deleted: list[int] = []
     skipped: list[dict[str, Any]] = []
     for run in runs:

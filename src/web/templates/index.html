@@ -591,15 +591,28 @@
           window.open(authUrl, '_blank');
 
           status.innerHTML =
-            '<strong>Google Sign-in Required:</strong> Please complete sign-in in the opened tab.<br>' +
-            '<a href="' + authUrl + '" target="_blank" class="btn btn-small" style="margin: 8px 0; display: inline-block;">' +
-            '👉 Click here if window did not open</a><br>' +
-            '<span style="opacity:0.8;">Waiting for authorization to complete…</span>';
+            '<div style="background:#27272a; border:1px solid rgba(255,255,255,0.1); border-radius:8px; padding:16px; margin-top:8px;">' +
+              '<div style="font-weight:700; color:#f4f4f5; margin-bottom:6px;">Google Sign-in Required</div>' +
+              '<div style="margin-bottom:8px; color:#a1a1aa;">Complete sign-in in the opened tab to authorize this YouTube client.</div>' +
+              '<a href="' + authUrl + '" target="_blank" class="btn btn-small" style="display:inline-block; margin-bottom:12px;">👉 Click here if window did not open</a>' +
+              '<div style="border-top:1px solid rgba(255,255,255,0.1); padding-top:12px; margin-top:8px;">' +
+                '<div style="font-weight:600; color:#38bdf8; font-size:0.85rem; margin-bottom:4px;">🌐 Working Remotely or from Mobile?</div>' +
+                '<p style="font-size:0.75rem; color:#a1a1aa; margin-bottom:8px; line-height:1.4;">' +
+                  'If your browser displays <em>"Unable to connect to localhost"</em> after signing into Google, that is normal for remote servers! Copy the URL from your browser address bar and paste it below:' +
+                '</p>' +
+                '<div style="display:flex; gap:8px;">' +
+                  '<input type="text" id="manual-callback-url-' + clientId + '" class="input" placeholder="Paste http://localhost:... or code here" style="flex:1; font-size:0.75rem; padding:6px 10px; background:#18181b; border:1px solid rgba(255,255,255,0.2); border-radius:4px; color:#f4f4f5;">' +
+                  '<button type="button" class="btn btn-small" style="background:#2563eb; color:#fff;" onclick="submitManualCallback(\'' + clientId + '\')">Complete Authorization</button>' +
+                '</div>' +
+                '<div id="manual-callback-msg-' + clientId + '" style="font-size:0.75rem; margin-top:6px;"></div>' +
+              '</div>' +
+              '<div style="font-size:0.75rem; opacity:0.8; margin-top:10px;">⏳ Waiting for authorization to complete… (Timeout: 10 minutes)</div>' +
+            '</div>';
 
           // Poll for completion
           const startTime = Date.now();
           _authPollTimer = setInterval(async () => {
-            if (Date.now() - startTime > 180000) {
+            if (Date.now() - startTime > 600000) {
               clearInterval(_authPollTimer);
               _authPollTimer = null;
               status.textContent = clientId + ': Authorization timed out. Please try again.';
@@ -630,6 +643,33 @@
         status.textContent = data.detail || 'Action failed';
       } catch (e) {
         status.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    async function submitManualCallback(clientId) {
+      const input = document.getElementById('manual-callback-url-' + clientId);
+      const msg = document.getElementById('manual-callback-msg-' + clientId);
+      const val = (input ? input.value : '').trim();
+      if (!val) {
+        if (msg) msg.innerHTML = '<span style="color:var(--color-danger, #ef4444);">Please paste the redirect URL or code first.</span>';
+        return;
+      }
+      if (msg) msg.innerHTML = '<span style="color:#38bdf8;">Exchanging code with Google…</span>';
+      try {
+        const res = await fetch('/api/youtube/clients/' + encodeURIComponent(clientId) + '/submit-code', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: val }),
+        });
+        const data = await res.json();
+        if (data.ok || data.status === 'completed') {
+          if (msg) msg.innerHTML = '<strong style="color:var(--color-success, #22c55e);">✓ Authorized successfully! Reloading…</strong>';
+          setTimeout(() => location.reload(), 1000);
+        } else {
+          if (msg) msg.innerHTML = '<span style="color:var(--color-danger, #ef4444);">' + (data.detail || 'Failed to exchange code') + '</span>';
+        }
+      } catch (err) {
+        if (msg) msg.innerHTML = '<span style="color:var(--color-danger, #ef4444);">Error: ' + err.message + '</span>';
       }
     }
 
