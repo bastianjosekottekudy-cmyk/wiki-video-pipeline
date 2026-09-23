@@ -172,7 +172,7 @@ def _status_dict(
         "can_refresh": can_refresh,
         "has_secrets": client.client_secrets.is_file(),
         "has_token": client.token.is_file(),
-        "action_label": "Refresh" if status == "ok" else "Authorize",
+        "action_label": "Refresh" if (status == "ok" or can_refresh) else "Authorize",
     }
 
 
@@ -194,7 +194,7 @@ def probe_client_status(
             client,
             "missing_token",
             detail="No token — authorize to enable uploads",
-            can_refresh=True,
+            can_refresh=False,
         )
 
     try:
@@ -204,24 +204,24 @@ def probe_client_status(
             client,
             "needs_reauth",
             detail=f"Unreadable token ({exc})",
-            can_refresh=True,
+            can_refresh=False,
         )
 
     if creds and creds.valid:
-        return _status_dict(client, "ok", detail="Token valid")
+        return _status_dict(client, "ok", detail="Token valid", can_refresh=True)
 
-    if creds and creds.expired and creds.refresh_token:
+    if creds and creds.refresh_token:
         if not attempt_refresh:
             return _status_dict(
                 client,
-                "expired",
-                detail="Access token expired — refresh available",
+                "ok",
+                detail="Connected (Auto-refresh on demand)",
                 can_refresh=True,
             )
         try:
             _refresh_or_raise(creds, client.token, client_id=client.id)
             return _status_dict(
-                client, "ok", detail="Token refreshed"
+                client, "ok", detail="Token refreshed & valid", can_refresh=True
             )
         except RefreshError as exc:
             if _is_invalid_grant(exc):
