@@ -20,6 +20,7 @@ if _system_ffmpeg and "IMAGEIO_FFMPEG_EXE" not in os.environ:
 from src.audio.tts import generate_narration
 from src.concurrency import ConcurrencyConflictError, topic_locks
 from src.config import (
+    OUTPUT_DIR,
     format_profile,
     local_run_date,
     run_output_dir,
@@ -125,7 +126,25 @@ def attempt_youtube_upload(
                 if should_delete_after_upload(delete_after_upload):
                     try:
                         p = Path(video_path)
-                        if p.is_file():
+                        run_dir = p.parent
+                        if run_dir.is_dir() and run_dir.name.startswith("run_"):
+                            shutil.rmtree(run_dir, ignore_errors=True)
+                            logger.info(
+                                "Deleted local run directory after upload for run %s: %s",
+                                run_id,
+                                run_dir,
+                            )
+                            store.append_step_log(
+                                run_id, "cleanup", f"Deleted local run folder: {run_dir.name}"
+                            )
+                            for parent in (run_dir.parent, run_dir.parent.parent):
+                                try:
+                                    if parent.is_dir() and parent.resolve() != OUTPUT_DIR.resolve():
+                                        if not any(parent.iterdir()):
+                                            parent.rmdir()
+                                except OSError:
+                                    pass
+                        elif p.is_file():
                             p.unlink()
                             logger.info(
                                 "Deleted local video after upload for run %s: %s",

@@ -784,7 +784,10 @@ async def api_delete_runs_bulk(scope: str = "all") -> JSONResponse:
     scope_key = (scope or "all").strip().lower()
     if scope_key not in ("all", "uploaded", "failed"):
         raise HTTPException(status_code=400, detail="scope must be 'all', 'uploaded', or 'failed'")
-    runs = store.list_runs(limit=5000)
+    runs = store.list_runs(
+        limit=5000,
+        include_dashboard_deleted=(scope_key == "uploaded"),
+    )
     if scope_key == "uploaded":
         runs = [r for r in runs if _run_is_uploaded(r)]
     elif scope_key == "failed":
