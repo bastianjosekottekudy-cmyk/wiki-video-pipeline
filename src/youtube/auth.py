@@ -30,7 +30,10 @@ from src.config import PROJECT_ROOT, SECRETS_DIR, get_env, load_pipeline_config
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube.readonly",
+]
 # Backward-compatible aliases for primary client paths.
 TOKEN_PATH = SECRETS_DIR / "token.json"
 DEFAULT_WEB_REDIRECT_URI = "http://127.0.0.1:8082/api/youtube/oauth/callback"
@@ -113,6 +116,15 @@ def _sync_token_to_central_store(client_id: str, token_path: Path) -> None:
             / "google-auth"
             / "secrets"
             / "tokens"
+            / "youtube_wiki"
+            / client_id
+            / "token.json",
+            Path.home()
+            / ".agents"
+            / "skills"
+            / "google-auth"
+            / "secrets"
+            / "tokens"
             / "youtube"
             / client_id
             / "token.json",
@@ -122,7 +134,7 @@ def _sync_token_to_central_store(client_id: str, token_path: Path) -> None:
             / "google-auth"
             / "secrets"
             / "tokens"
-            / "youtube"
+            / "youtube_wiki"
             / client_id
             / "token.json",
         ]
@@ -156,15 +168,64 @@ def _refresh_or_raise(creds: Credentials, token_path: Path, client_id: str = "")
     return creds
 
 
+_CHANNEL_CACHE: dict[str, tuple[float, dict[str, str]]] = {}
+
+
+def get_channel_info(creds: Credentials, cache_ttl_sec: float = 3600.0) -> dict[str, str]:
+    """Fetch channel title, handle (@customUrl), id, and thumbnail url."""
+    empty = {
+        "channel_id": "",
+        "channel_title": "",
+        "channel_handle": "",
+        "channel_thumbnail": "",
+    }
+    if not creds or not creds.valid:
+        return empty
+    key = hashlib.sha256((creds.token or creds.refresh_token or "").encode("utf-8")).hexdigest()
+    now = time.time()
+    if key in _CHANNEL_CACHE:
+        ts, data = _CHANNEL_CACHE[key]
+        if now - ts < cache_ttl_sec:
+            return data
+    try:
+        from googleapiclient.discovery import build
+
+        service = build("youtube", "v3", credentials=creds, cache_discovery=False)
+        resp = service.channels().list(mine=True, part="snippet").execute()
+        items = resp.get("items") or []
+        if items:
+            item = items[0]
+            snip = item.get("snippet") or {}
+            thumbs = snip.get("thumbnails") or {}
+            thumb = (
+                (thumbs.get("default") or {}).get("url")
+                or (thumbs.get("medium") or {}).get("url")
+                or ""
+            )
+            res = {
+                "channel_id": str(item.get("id") or ""),
+                "channel_title": str(snip.get("title") or ""),
+                "channel_handle": str(snip.get("customUrl") or ""),
+                "channel_thumbnail": thumb,
+            }
+            _CHANNEL_CACHE[key] = (now, res)
+            return res
+    except Exception as exc:
+        logger.debug("Could not fetch YouTube channel info: %s", exc)
+    return empty
+
+
 def _status_dict(
     client: YouTubeClient,
     status: str,
     *,
     detail: str = "",
     can_refresh: bool | None = None,
+    channel_info: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if can_refresh is None:
         can_refresh = client.client_secrets.is_file()
+    ch = channel_info or {}
     return {
         "id": client.id,
         "status": status,
@@ -173,6 +234,10 @@ def _status_dict(
         "has_secrets": client.client_secrets.is_file(),
         "has_token": client.token.is_file(),
         "action_label": "Refresh" if (status == "ok" or can_refresh) else "Authorize",
+        "channel_id": ch.get("channel_id", ""),
+        "channel_title": ch.get("channel_title", ""),
+        "channel_handle": ch.get("channel_handle", ""),
+        "channel_thumbnail": ch.get("channel_thumbnail", ""),
     }
 
 
@@ -198,7 +263,7 @@ def probe_client_status(
         )
 
     try:
-        creds = Credentials.from_authorized_user_file(str(client.token), SCOPES)
+        creds = Credentials.from_authorized_user_file(str(client.token))
     except Exception as exc:  # noqa: BLE001
         return _status_dict(
             client,
@@ -208,7 +273,8 @@ def probe_client_status(
         )
 
     if creds and creds.valid:
-        return _status_dict(client, "ok", detail="Token valid", can_refresh=True)
+        ch_info = get_channel_info(creds)
+        return _status_dict(client, "ok", detail="Token valid", can_refresh=True, channel_info=ch_info)
 
     if creds and creds.refresh_token:
         if not attempt_refresh:
@@ -220,8 +286,9 @@ def probe_client_status(
             )
         try:
             _refresh_or_raise(creds, client.token, client_id=client.id)
+            ch_info = get_channel_info(creds)
             return _status_dict(
-                client, "ok", detail="Token refreshed & valid", can_refresh=True
+                client, "ok", detail="Token refreshed & valid", can_refresh=True, channel_info=ch_info
             )
         except RefreshError as exc:
             if _is_invalid_grant(exc):
@@ -382,7 +449,7 @@ class OAuthAuthSession:
         self.server_port = local_server.server_port
 
         flow.redirect_uri = f"http://localhost:{local_server.server_port}/"
-        auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+        auth_url, _ = flow.authorization_url(access_type="offline", prompt="select_account consent")
         self.auth_url = auth_url
 
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -543,7 +610,7 @@ def try_silent_refresh(client_id: str) -> dict[str, Any]:
         return result
 
     try:
-        creds = Credentials.from_authorized_user_file(str(client.token), SCOPES)
+        creds = Credentials.from_authorized_user_file(str(client.token))
     except Exception as exc:  # noqa: BLE001
         result = _status_dict(
             client,
@@ -773,7 +840,7 @@ def _run_browser_oauth(client_path: Path) -> Credentials:
     try:
         flow.redirect_uri = f"http://localhost:{local_server.server_port}/"
         auth_url, _ = flow.authorization_url(
-            access_type="offline", prompt="consent"
+            access_type="offline", prompt="select_account consent"
         )
         logger.info("Please visit this URL to authorize this application: %s", auth_url)
         print(f"Please visit this URL to authorize this application: {auth_url}", flush=True)
@@ -826,7 +893,7 @@ def get_credentials_for_client(
 
     if token_path.exists():
         try:
-            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+            creds = Credentials.from_authorized_user_file(str(token_path))
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Could not load token for %s (%s) — will re-auth", client.id, exc
@@ -914,11 +981,37 @@ def main() -> None:
         help="Client id from youtube.clients in pipeline.yaml (default: primary)",
     )
     parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Print real-time status and channel identity for all configured clients",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Ignore existing valid token and open browser login",
     )
     args = parser.parse_args()
+
+    if args.status:
+        clients = list_youtube_clients()
+        print(f"\nYouTube OAuth Status ({len(clients)} configured clients):")
+        print("=" * 60)
+        for c in clients:
+            status = probe_client_status(c, attempt_refresh=True)
+            st = status.get("status")
+            badge = "✓ VALID" if st == "ok" else f"✗ {st.upper()}"
+            print(f"[{c.id}] {badge} — {status.get('detail')}")
+            print(f"  Secrets: {c.client_secrets} ({'FOUND' if status.get('has_secrets') else 'MISSING'})")
+            print(f"  Token:   {c.token} ({'FOUND' if status.get('has_token') else 'MISSING'})")
+            if status.get("channel_title"):
+                h = f" ({status['channel_handle']})" if status.get("channel_handle") else ""
+                print(f"  Channel: {status['channel_title']}{h} [ID: {status.get('channel_id')}]")
+                if status.get("channel_thumbnail"):
+                    print(f"  Avatar:  {status['channel_thumbnail']}")
+            elif st == "ok":
+                print("  Channel: Authorized (re-auth with current scopes to view channel name/handle)")
+            print("-" * 60)
+        return
 
     SECRETS_DIR.mkdir(parents=True, exist_ok=True)
     client = get_youtube_client(args.client)
@@ -934,7 +1027,7 @@ def main() -> None:
 
     if client.token.exists():
         try:
-            probe = Credentials.from_authorized_user_file(str(client.token), SCOPES)
+            probe = Credentials.from_authorized_user_file(str(client.token))
             if probe and probe.expired and probe.refresh_token:
                 probe.refresh(Request())
                 _save_token(probe, client.token)

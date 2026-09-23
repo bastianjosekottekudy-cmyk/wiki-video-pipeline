@@ -328,6 +328,16 @@ def run_topic(
                 store.stop_run(run_id, reason="Stopped by user")
                 raise
             except Exception as exc:
+                curr = store.get_run(run_id)
+                if curr and (curr.get("upload_status") == "uploaded" or curr.get("youtube_video_id")):
+                    logger.warning(
+                        "Run %s encountered post-upload error: %s; preserving success status",
+                        run_id,
+                        exc,
+                    )
+                    store.append_step_log(run_id, "warning", f"Post-upload warning: {exc}")
+                    store.finish_run(run_id, "success")
+                    return run_id
                 logger.exception("Run %s failed", run_id)
                 store.finish_run(run_id, "failed", error_message=str(exc))
                 store.append_step_log(run_id, "error", str(exc))

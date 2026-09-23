@@ -172,15 +172,36 @@
       {% for client in youtube_clients %}
       <li class="youtube-client-row">
         <div>
-          <strong>{{ client.id }}</strong>
-          <span class="badge badge-yt-{{ client.status }}">{{ client.status }}</span>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <strong>{{ client.id }}</strong>
+            <span class="badge badge-yt-{{ client.status }}">{{ client.status }}</span>
+          </div>
+          {% if client.channel_title %}
+          <div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
+            {% if client.channel_thumbnail %}
+            <img src="{{ client.channel_thumbnail }}" alt="Avatar" style="width:28px;height:28px;border-radius:50%;object-fit:cover;border:1px solid rgba(255,255,255,0.2);">
+            {% endif %}
+            <div>
+              <span style="font-size:0.9rem;font-weight:600;color:#38bdf8;">{{ client.channel_title }}</span>
+              {% if client.channel_handle %}
+              <span style="font-size:0.8rem;color:#94a3b8;margin-left:4px;">{{ client.channel_handle }}</span>
+              {% endif %}
+              {% if client.channel_id %}
+              <span style="font-size:0.75rem;color:#64748b;margin-left:4px;">({{ client.channel_id }})</span>
+              {% endif %}
+            </div>
+          </div>
+          {% endif %}
           {% if client.detail %}
-          <p class="meta">{{ client.detail }}</p>
+          <p class="meta" style="margin-top:4px;">{{ client.detail }}</p>
           {% endif %}
         </div>
-        {% if client.can_refresh %}
-        <button type="button" class="btn btn-small" onclick='refreshYoutubeClient({{ client.id|tojson }})'>{{ client.action_label or ('Refresh' if client.status == 'ok' else 'Authorize') }}</button>
-        {% endif %}
+        <div style="display:flex;gap:6px;align-items:center;">
+          {% if client.can_refresh %}
+          <button type="button" class="btn btn-small" onclick='refreshYoutubeClient({{ client.id|tojson }})'>{{ client.action_label or ('Refresh' if client.status == 'ok' else 'Authorize') }}</button>
+          {% endif %}
+          <button type="button" class="btn btn-small btn-secondary" style="background:#334155;color:#e2e8f0;" onclick='switchYoutubeChannel({{ client.id|tojson }})'>Switch Channel</button>
+        </div>
       </li>
       {% else %}
       <li class="hint">No YouTube clients configured.</li>
@@ -550,6 +571,79 @@
     }
 
     let _authPollTimer = null;
+
+    async function switchYoutubeChannel(clientId) {
+      const status = document.getElementById('youtube-auth-status');
+      if (_authPollTimer) {
+        clearInterval(_authPollTimer);
+        _authPollTimer = null;
+      }
+      status.innerHTML = 'Opening channel selection for ' + clientId + '…';
+      try {
+        const startRes = await fetch('/api/youtube/clients/' + encodeURIComponent(clientId) + '/start-auth', {
+          method: 'POST',
+        });
+        const startData = await startRes.json();
+        const authUrl = startData.auth_url;
+        if (authUrl) {
+          window.open(authUrl, '_blank');
+          renderOAuthBox(clientId, authUrl, status);
+        } else {
+          status.textContent = clientId + ': ' + (startData.detail || 'Could not start authorization flow');
+        }
+      } catch (err) {
+        status.textContent = 'Error: ' + err.message;
+      }
+    }
+
+    function renderOAuthBox(clientId, authUrl, statusEl) {
+      statusEl.innerHTML =
+        '<div style="background:#27272a; border:1px solid rgba(255,255,255,0.1); border-radius:8px; padding:16px; margin-top:8px;">' +
+          '<div style="font-weight:700; color:#f4f4f5; margin-bottom:6px;">Google Sign-in Required</div>' +
+          '<div style="margin-bottom:8px; color:#a1a1aa;">Choose your YouTube Channel or Brand Account in the opened window.</div>' +
+          '<a href="' + authUrl + '" target="_blank" class="btn btn-small" style="display:inline-block; margin-bottom:12px;">👉 Click here if window did not open</a>' +
+          '<div style="border-top:1px solid rgba(255,255,255,0.1); padding-top:12px; margin-top:8px;">' +
+            '<div style="font-weight:600; color:#38bdf8; font-size:0.85rem; margin-bottom:4px;">🌐 Working Remotely or from Mobile?</div>' +
+            '<p style="font-size:0.75rem; color:#a1a1aa; margin-bottom:8px; line-height:1.4;">' +
+              'If your browser displays <em>"Unable to connect to localhost"</em> after signing into Google, that is normal for remote servers! Copy the URL from your browser address bar and paste it below:' +
+            '</p>' +
+            '<div style="display:flex; gap:8px;">' +
+              '<input type="text" id="manual-callback-url-' + clientId + '" class="input" placeholder="Paste http://localhost:... or code here" style="flex:1; font-size:0.75rem; padding:6px 10px; background:#18181b; border:1px solid rgba(255,255,255,0.2); border-radius:4px; color:#f4f4f5;">' +
+              '<button type="button" class="btn btn-small" style="background:#2563eb; color:#fff;" onclick="submitManualCallback(\'' + clientId + '\')">Complete Authorization</button>' +
+            '</div>' +
+            '<div id="manual-callback-msg-' + clientId + '" style="font-size:0.75rem; margin-top:6px;"></div>' +
+          '</div>' +
+          '<div style="font-size:0.75rem; opacity:0.8; margin-top:10px;">⏳ Waiting for authorization to complete… (Timeout: 10 minutes)</div>' +
+        '</div>';
+
+      const startTime = Date.now();
+      _authPollTimer = setInterval(async () => {
+        if (Date.now() - startTime > 600000) {
+          clearInterval(_authPollTimer);
+          _authPollTimer = null;
+          statusEl.textContent = clientId + ': Authorization timed out. Please try again.';
+          return;
+        }
+
+        try {
+          const pollRes = await fetch('/api/youtube/clients/' + encodeURIComponent(clientId) + '/auth-status');
+          if (!pollRes.ok) return;
+          const pollData = await pollRes.json();
+          if (pollData.status === 'completed' || pollData.ok) {
+            clearInterval(_authPollTimer);
+            _authPollTimer = null;
+            statusEl.innerHTML = '<strong style="color:var(--color-success, #22c55e);">✓ ' + clientId + ': Authorized successfully!</strong> Reloading…';
+            setTimeout(() => location.reload(), 800);
+          } else if (pollData.status === 'error') {
+            clearInterval(_authPollTimer);
+            _authPollTimer = null;
+            statusEl.textContent = clientId + ': ' + (pollData.detail || 'Authorization failed');
+          }
+        } catch (err) {
+          // ignore transient fetch error
+        }
+      }, 2000);
+    }
 
     async function refreshYoutubeClient(clientId) {
       const status = document.getElementById('youtube-auth-status');
